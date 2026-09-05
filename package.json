@@ -1,0 +1,77 @@
+{
+  "name": "@interop/isomorphic-lib-template",
+  "description": "A Typescript/Javascript isomorphic library template, for use in the browser, Node.js, and React Native.",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run clear && tsc",
+    "clear": "rimraf dist/*",
+    "dev": "vite",
+    "fix": "eslint --fix src test && pnpm run format",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"*.md\"",
+    "lint": "eslint src test",
+    "prepare": "pnpm run build",
+    "rebuild": "pnpm run clear && pnpm run build",
+    "typecheck": "tsc -p tsconfig.dev.json",
+    "test": "pnpm run fix && pnpm run lint && pnpm run typecheck && pnpm run test:node && pnpm run test:browser",
+    "test:browser": "playwright test",
+    "test:node": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "react-native": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "module": "dist/index.js",
+  "browser": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "sideEffects": false,
+  "dependencies": {
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^26.0.1",
+    "@vitest/coverage-v8": "^4.1.7",
+    "eslint": "^10.4.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.3",
+    "rimraf": "^6.1.3",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.4",
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "keywords": [
+    "isomorphic"
+  ],
+  "packageManager": "pnpm@11.5.0",
+  "engines": {
+    "node": ">=24.0"
+  },
+  "author": {
+    "name": "Interop Alliance",
+    "url": "https://github.com/interop-alliance/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/interop-alliance/isomorphic-lib-template.git"
+  },
+  "homepage": "https://github.com/interop-alliance/isomorphic-lib-template",
+  "bugs": "https://github.com/interop-alliance/isomorphic-lib-template/issues"
+}

@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // Pure type-checker over the whole repo (src + tests + config files). It
+    // checks more files than the build (tsconfig.json), so it must NOT inherit
+    // the build's output-layout contract: `declaration` + `rootDir:"src"` make
+    // tsc demand every input live under src/, which the test/config files
+    // violate (TS6059). Override them here -- nothing is emitted (noEmit), so
+    // there is no output layout to enforce. Also used as eslint's typed project.
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": "."
+  },
+  "include": [
+    "src/**/*",
+    "test/**/*.ts",
+    "vite.config.ts",
+    "playwright.config.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

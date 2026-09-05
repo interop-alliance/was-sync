@@ -1,0 +1,39 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # required for npm provenance
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Provision pnpm via Corepack (bundled with Node) from the
+      # `packageManager` pin in package.json, avoiding the flaky
+      # pnpm/action-setup self-installer.
+      - name: Enable Corepack
+        run: corepack enable
+
+      # Node 24's bundled npm is already >= 11.5.1, as trusted publishing
+      # requires. Do not `npm install -g npm@latest` here: npm overwriting
+      # itself in the runner toolcache leaves it unable to resolve `sigstore`.
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Publish to npm
+        run: npm publish
