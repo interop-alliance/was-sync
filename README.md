@@ -166,6 +166,25 @@ await controller.stop()
 different rates and a package default would silently change one app's background
 request rate.
 
+### Logging
+
+The package logs through a structural `Logger` port (four two-arg methods:
+`debug`, `info`, `warn`, `error`, each taking a static message and an optional
+`data` object, with `data.err` reserved for an Error). An app that never wires
+one gets a console fallback prefixed `[was-sync]`. To route the package's events
+into the app's own sinks, install a logger once at bootstrap:
+
+```ts
+import { createLogger } from '@interop/logger'
+import { setLogger } from '@interop/was-sync'
+
+setLogger(createLogger('sync'))
+```
+
+`setLogger` returns the previously installed logger, so a test can restore it in
+`afterEach`. `@interop/logger` is not a dependency of this package; any object
+with the four methods works.
+
 ## Contribute
 
 PRs accepted. See [CONTRIBUTING.md](CONTRIBUTING.md) for editor setup (Prettier,

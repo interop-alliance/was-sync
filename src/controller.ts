@@ -19,8 +19,8 @@
  * through one `port` object; status goes out through `onStatus` rather than into
  * a store, so a state-management library stays app-side; the online source and
  * the timer are ports, so the core reaches for neither `window` nor `navigator`
- * and a test drives both; and the log port defaults to a no-op, so the core
- * holds no logging opinion.
+ * and a test drives both; and diagnostics go through the package's logging
+ * seam (`setLogger`), which an app wires once at bootstrap.
  *
  * The lifecycle reconciles two properties the consuming apps each had one half
  * of. Every transition runs on a serialized FIFO queue, so an overlapping start
@@ -37,12 +37,8 @@ import {
   isSyncAuthError,
   type SyncStatus
 } from '@interop/was-client/sync'
-import type {
-  SyncCheckpoint,
-  SyncedDoc,
-  SyncLogPort,
-  WasSyncPort
-} from './types.js'
+import type { SyncCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
+import { log } from './log.js'
 import { createWasReplication } from './wasReplication.js'
 import { withFeedPrimaryRead } from './feedPrimaryPort.js'
 
@@ -171,7 +167,6 @@ export function isAuthError(err: unknown): boolean {
  * @param [options.schedule] {SyncSchedule}
  * @param [options.onlineSource] {SyncOnlineSource}
  * @param options.pollMs {number}                     0 disables the poll timer
- * @param [options.log] {SyncLogPort}
  * @returns {SyncController}
  */
 export function createSyncController({
@@ -181,8 +176,7 @@ export function createSyncController({
   onRemoteChange,
   schedule = defaultSchedule,
   onlineSource,
-  pollMs,
-  log
+  pollMs
 }: {
   port: {
     wasClient: WasClient
@@ -202,7 +196,6 @@ export function createSyncController({
   schedule?: SyncSchedule
   onlineSource?: SyncOnlineSource
   pollMs: number
-  log?: SyncLogPort
 }): SyncController {
   const replications: Array<{
     state: RxReplicationState<SyncedDoc, SyncCheckpoint>
@@ -270,7 +263,7 @@ export function createSyncController({
       try {
         await state.cancel()
       } catch (err) {
-        log?.error('Error cancelling replication', { err })
+        log.error('Error cancelling replication', { err })
       }
     }
     replications.length = 0
@@ -284,7 +277,7 @@ export function createSyncController({
     try {
       for (const { key, id, capability } of port.collections) {
         if (capabilityScoped && capability === undefined) {
-          log?.warn('Skipping sync: no delegated capability covers it', { id })
+          log.warn('Skipping sync: no delegated capability covers it', { id })
           onStatus(key, id, 'error')
           continue
         }
@@ -328,7 +321,7 @@ export function createSyncController({
             onStatus(key, id, active ? 'syncing' : 'synced')
           }),
           state.error$.subscribe(err => {
-            log?.error('Sync error for collection', { id, err })
+            log.error('Sync error for collection', { id, err })
             onStatus(key, id, 'error')
             if (onAuthError !== undefined && isAuthError(err)) {
               onAuthError()
@@ -361,7 +354,7 @@ export function createSyncController({
         }, pollMs)
       }
     } catch (err) {
-      log?.error('Failed to start sync controller', { err })
+      log.error('Failed to start sync controller', { err })
       // Unwind the partial bring-up WITHOUT stopping: the terminal latch would
       // permanently refuse a later start on this instance, and a status reset
       // would report "not replicating" over a session that failed to start.

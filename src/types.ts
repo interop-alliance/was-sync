@@ -50,22 +50,6 @@ export type { Json }
 export type WithDeleted<DocType> = DocType & { _deleted: boolean }
 
 /**
- * The diagnostics seam. The driver holds no logging opinion: each consumer
- * passes its own namespaced logger, and the default is a no-op, so a library
- * with no logger configured writes nothing to the console.
- *
- * The metadata argument is an index signature rather than `object` so a
- * namespaced logger whose methods take `Record<string, unknown>` satisfies the
- * port directly. A parameter type is checked contravariantly, so the narrower
- * `object` would have forced every consumer to wrap its logger in adapter
- * closures.
- */
-export interface SyncLogPort {
-  warn: (message: string, meta?: Record<string, unknown>) => void
-  error: (message: string, meta?: Record<string, unknown>) => void
-}
-
-/**
  * The two fields the last-write-wins rule reads off a payload: the app-owned
  * ISO-8601 edit stamp and the writing client's id (the exact-instant
  * tiebreaker). Read off a doc with {@link lwwFields}; compared with

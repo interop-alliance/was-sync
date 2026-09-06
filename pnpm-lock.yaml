@@ -24,6 +24,9 @@ importers:
       '@interop/ed25519-verification-key':
         specifier: ^8.1.0
         version: 8.1.0
+      '@interop/logger':
+        specifier: ^0.2.0
+        version: 0.2.0
       '@interop/was-client':
         specifier: ^0.49.0
         version: 0.49.0(@interop/jsonld-signatures@11.8.5)
@@ -396,6 +399,10 @@ packages:
   '@interop/jsonld@9.0.3':
     resolution: {integrity: sha512-i25LeKC9a9GBdwVGopwGlzvTQPuq5Ssgvt/Vh3XdNhJ2yIySCZmp+XApKlL14PxnjewFUfRnBO+bpm1qiAZW/A==}
     engines: {node: '>=18'}
+
+  '@interop/logger@0.2.0':
+    resolution: {integrity: sha512-Iv79MVdrnqYefi0P0G4npe/abOdEkgMc7Pb7ZanN5TFupO1TK0PxiAA425ikcbq2B/TyuBDdpuWbB8M7m1eTOA==}
+    engines: {node: '>=24.0'}
 
   '@interop/lru-memoize@4.0.3':
     resolution: {integrity: sha512-6c8dnoQNIiL25Q4YovC1a44mREO1lzW3F/lmvdwbAMMbhtGGRoQeqo1H4diwNhBzaxRrUMXrAIwbM26POmI/Yg==}
@@ -3133,6 +3140,8 @@ snapshots:
       canonicalize: 2.1.0
       lru-cache: 6.0.0
       rdf-canonize: 5.0.0
+
+  '@interop/logger@0.2.0': {}
 
   '@interop/lru-memoize@4.0.3':
     dependencies:

@@ -17,7 +17,7 @@
     "test:browser": "playwright test",
     "test:node": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:packaging": "pnpm run build && vitest run --config vitest.packaging.config.ts"
+    "test:packaging": "pnpm run build && ! grep -rl @interop/logger dist && vitest run --config vitest.packaging.config.ts"
   },
   "files": [
     "dist",
@@ -56,6 +56,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@interop/ed25519-verification-key": "^8.1.0",
+    "@interop/logger": "^0.2.0",
     "@interop/was-client": "^0.49.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^26.0.1",

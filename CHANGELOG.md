@@ -2,6 +2,11 @@
 
 ## 0.1.2 - TBD
 
+### Added
+
+- The driver's swallow points now log: the ack write-back failure at `warn`, and
+  the benign-412 delete re-issue and the conflict hand-back at `debug`.
+
 ### Changed
 
 - **Breaking:** `FakeWasServer` is removed from `@interop/was-sync/testing`. The
@@ -10,6 +15,13 @@
   server's conditional-write, tombstone, and `changes`-feed behavior is
   exercised rather than modeled (WS-11). The stub port and the memory schedule
   and online source remain on the subpath.
+- **Breaking:** `SyncLogPort` and the per-call `log` options on
+  `createSyncController`, `makeConflictHandler`, `lwwResolver`, and
+  `makeLwwConflictHandler` are removed. The package adopts the ecosystem logging
+  library port instead: `setLogger` and the `Logger` type on the root entry. An
+  app wires one logger once at bootstrap, e.g.
+  `setLogger(createLogger('sync'))`; the console fallback (prefixed
+  `[was-sync]`) applies otherwise (WS-12).
 
 ### Fixed
 

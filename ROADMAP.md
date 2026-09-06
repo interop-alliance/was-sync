@@ -1,6 +1,6 @@
 # WAS Sync Roadmap (open items)
 
-nextAvailableId: 12
+nextAvailableId: 13
 
 Status as of 2026-09-05. Uses the formalized item structure shared across the
 `@interop/*` repos.
@@ -48,7 +48,7 @@ rather than a create. Each conflict write bumps the fork revision and retriggers
 upstream, so this is a hot loop rather than a per-poll retry. Freewallet runs
 this port.
 
-### WS-3: Delete with no assumed master is sent unconditionally
+### WS-3: Delete with no assumed primary is sent unconditionally
 
 - status: todo
 - priority: high
@@ -250,3 +250,65 @@ divergence in `query` / `putContent` / `deleteContent` / `get`, not just
 push or pull cycle as an `error$` event. Two consumers carrying the same
 cast-and-probe is the signal that the fix belongs upstream, after which the
 divergence becomes a compile error at the seam.
+
+### WS-12: Adopt the ecosystem logging library port
+
+- status: in-progress
+- priority: medium
+- labels: logging, types, api
+- touches:
+  - shipped: was-sync (`src/log.ts` added; `SyncLogPort` and every `log?:`
+    option removed from `controller.ts` and `conflictHandler.ts`;
+    ARCHITECTURE.md invariant 13, layout, and Glossary; AGENTS.md; README
+    Logging section; CHANGELOG 0.1.2)
+  - shipped: freewallet (`syncController.ts` and `contactsConflictHandler.ts`
+    pass no `log`; `src/lib/log.ts` wires `setLogger(createLogger('sync'))`
+    beside `wc`; the `debug-logs` skill names `sync`; CHANGELOG 0.50.0; pins
+    `link:../was-sync` until this version is published)
+  - shipped: was-react (its `setLogger` forwards the logger to was-sync, so the
+    driver's events arrive under `wr` -- decided 2026-09-06; the `log` options
+    in `syncController.ts` and `localStore.ts` are dropped; README and CHANGELOG
+    0.22.1; pins `link:../was-sync` until this version is published)
+  - shipped: logger (README "Namespaces and the filter" lists `sync:` (was-sync)
+    beside `fw:`, `wc:`, `wr:`, `dcw:`)
+- acceptance:
+  - [x] `src/log.ts` follows wallet-core's `src/log.ts` verbatim in shape: a
+        locally declared four-method `Logger` (`debug`, `info`, `warn`, `error`,
+        each `(msg, data?: Record<string, unknown>)`), a module-level logger
+        defaulting to a `'[was-sync]'`-prefixed console fallback, and
+        `setLogger(logger): Logger` exported from the package root, returning
+        the previous logger
+  - [x] `@interop/logger` is a devDependency only, imported as `import type` in
+        tests alone; a mutual-assignability test pins the local `Logger` to the
+        package's, and `test:packaging` greps `dist/` for the specifier the way
+        wallet-core's `test:dist` does
+  - [x] The eslint `no-restricted-imports` rule allows only type imports of
+        `@interop/logger` in `src/`, with `src/log.ts` the stated exception
+  - [x] `SyncLogPort` and the per-call `log` options are gone; the controller
+        and conflict-handler call sites log through the module-level logger. The
+        whole package emits under the one `sync` namespace the app wires
+        (decided 2026-09-05: the four-method port carries no namespace, so
+        per-area sub-namespaces such as `sync:push` are not expressible through
+        it; the area is read off the message)
+  - [x] The driver's swallow points emit through the seam: the best-effort ack
+        patch in `src/wasReplication.ts` warns; a benign 412 delete retry and a
+        conflict handed back to RxDB log at `debug`
+  - [ ] `touches:` entries resolved; freewallet's and was-react's suites stay
+        green against the published version (green against `link:` as of
+        2026-09-06; the published-version check remains)
+
+Context: The driver's diagnostics seam is a two-method structural `SyncLogPort`
+(`src/types.ts`) threaded per call as an `options.log` on the controller core
+and the conflict-handler builders, defaulting to a no-op. The RxDB handlers in
+`wasReplication.ts`, `pushWrites.ts`, and `feedPrimaryPort.ts` log nothing,
+since threading a port through closures RxDB's `replicateRxCollection`
+constructs is clumsy. wallet-core and was-react both follow the logging
+package's library-port convention instead: a locally declared `Logger`, a
+`setLogger` an app calls once at bootstrap, the package as a devDependency, and
+a test pinning the local type to the package's. was-sync is the odd one out on
+three counts: its port cannot emit `info` or `debug`, so per-cycle diagnostics
+gated behind the namespace filter are impossible; it is threaded rather than set
+once; and nothing pins it against drift. The prefix `sync` joins the namespace
+list in the logging package's README (`fw`, `wc`, `wr`, `dcw`). One seam
+replaces two, per the greenfield stance; consumers lose an option from each
+builder.

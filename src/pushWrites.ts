@@ -67,6 +67,7 @@ import type {
   WithDeleted
 } from './types.js'
 import { bodiesEqual, copyOptionalBodyFields } from './types.js'
+import { log } from './log.js'
 
 /**
  * The acked server revisions of one row's accepted writes: the new content
@@ -198,7 +199,16 @@ async function pushRow({
   })
 
   // The 412 path: re-read the resource, then report its real primary state.
-  const conflictResult = async () => conflictOutcome(await readPrimary())
+  const conflictResult = async () => {
+    const outcome = conflictOutcome(await readPrimary())
+    log.debug('Write refused; handing the conflict entry to RxDB', {
+      id,
+      assumedVersion,
+      version: outcome.conflict.version,
+      deleted: outcome.conflict._deleted
+    })
+    return outcome
+  }
 
   // `DELETE /:id` with a `404` read as the already-absent outcome (the
   // header's delete note): the write is reported as accepted with no acked
@@ -242,6 +252,11 @@ async function pushRow({
       ) {
         throw err
       }
+      log.debug('Delete refused on a drifted revision; re-issuing it', {
+        id,
+        assumedVersion,
+        version: primary.version
+      })
       return await deleteAbsentAsDone({
         id,
         ifMatch: formatEtag(primary.version)

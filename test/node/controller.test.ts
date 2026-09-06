@@ -14,9 +14,11 @@
  * themselves (the integration suite drives a real one).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { captureLogger } from '@interop/logger'
 import type { WasClient } from '@interop/was-client'
 import { WasSyncAuthError } from '@interop/was-client/sync'
 import { memoryOnlineSource, memorySchedule } from '../../src/testing.js'
+import { setLogger } from '../../src/log.js'
 
 const createWasReplication = vi.fn()
 
@@ -83,28 +85,23 @@ function fakeRxCollection() {
   return { $: stream<unknown>() }
 }
 
-function capturingLog(): {
-  warn: (message: string, meta?: Record<string, unknown>) => void
-  error: (message: string, meta?: Record<string, unknown>) => void
-  warnings: string[]
-  errors: string[]
-} {
-  const warnings: string[] = []
-  const errors: string[] = []
-  return {
-    warnings,
-    errors,
-    warn: message => {
-      warnings.push(message)
-    },
-    error: message => {
-      errors.push(message)
-    }
-  }
+/**
+ * The package's logging seam, captured per test. The core logs through the
+ * module-level logger rather than a per-call port, so a test installs a capture
+ * logger before the run and reads the warn / error events back off it.
+ */
+let capture = captureLogger('sync')
+
+function logged(level: 'warn' | 'error'): string[] {
+  return capture.events
+    .filter(event => event.level === level)
+    .map(event => event.msg)
 }
 
 beforeEach(() => {
   createWasReplication.mockReset()
+  capture = captureLogger('sync')
+  setLogger(capture.logger)
 })
 
 describe('createSyncController lifecycle', () => {
@@ -166,7 +163,6 @@ describe('createSyncController lifecycle', () => {
     const cancelOrder: string[] = []
     createWasReplication.mockReturnValue(fakeReplication(cancelOrder, 'notes'))
     const statuses: Array<[string, string]> = []
-    const log = capturingLog()
     const rxCollection = vi.fn(fakeRxCollection)
     const controller = createSyncController({
       port: {
@@ -184,8 +180,7 @@ describe('createSyncController lifecycle', () => {
         rxCollection: rxCollection as never
       },
       onStatus: (key, _id, status) => statuses.push([key, status]),
-      pollMs: 0,
-      log
+      pollMs: 0
     })
     await controller.start()
 
@@ -194,7 +189,7 @@ describe('createSyncController lifecycle', () => {
     expect(statuses).toContainEqual(['posts', 'error'])
     expect(createWasReplication).toHaveBeenCalledTimes(1)
     expect(rxCollection).toHaveBeenCalledExactlyOnceWith('notes')
-    expect(log.warnings).toHaveLength(1)
+    expect(logged('warn')).toHaveLength(1)
     await controller.stop()
   })
 
@@ -271,7 +266,6 @@ describe('createSyncController lifecycle', () => {
 
 describe('createSyncController failed bring-up', () => {
   it('flags every collection, rethrows, and stays re-startable', async () => {
-    const log = capturingLog()
     createWasReplication.mockImplementation(() => {
       throw new Error('database closed')
     })
@@ -288,14 +282,13 @@ describe('createSyncController failed bring-up', () => {
         rxCollection: (() => fakeRxCollection()) as never
       },
       onStatus: (key, _id, status) => statuses.push([key, status]),
-      pollMs: 0,
-      log
+      pollMs: 0
     })
 
     await expect(controller.start()).rejects.toThrow('database closed')
     expect(statuses).toContainEqual(['notes', 'error'])
     expect(statuses).toContainEqual(['posts', 'error'])
-    expect(log.errors).toHaveLength(1)
+    expect(logged('error')).toHaveLength(1)
 
     // Not latched: a later start runs its body again rather than no-opping.
     await expect(controller.start()).rejects.toThrow('database closed')
@@ -340,7 +333,6 @@ describe('createSyncController error escalation', () => {
     const replication = fakeReplication(cancelOrder, 'notes')
     createWasReplication.mockReturnValue(replication)
     const onAuthError = vi.fn()
-    const log = capturingLog()
     const statuses: string[] = []
     const controller = createSyncController({
       port: {
@@ -352,8 +344,7 @@ describe('createSyncController error escalation', () => {
       },
       onStatus: (_key, _id, status) => statuses.push(status),
       onAuthError,
-      pollMs: 0,
-      log
+      pollMs: 0
     })
     await controller.start()
 
@@ -363,7 +354,7 @@ describe('createSyncController error escalation', () => {
     })
     expect(onAuthError).toHaveBeenCalledOnce()
     expect(statuses).toContain('error')
-    expect(log.errors).toHaveLength(1)
+    expect(logged('error')).toHaveLength(1)
 
     replication.error$.emit(new Error('network down'))
     expect(onAuthError).toHaveBeenCalledOnce()
@@ -529,7 +520,6 @@ describe('createSyncController stop', () => {
       throw new Error('already closed')
     })
     createWasReplication.mockReturnValue(replication)
-    const log = capturingLog()
     const controller = createSyncController({
       port: {
         wasClient,
@@ -539,8 +529,7 @@ describe('createSyncController stop', () => {
         rxCollection: (() => fakeRxCollection()) as never
       },
       onStatus: () => {},
-      pollMs: 0,
-      log
+      pollMs: 0
     })
     await controller.start()
 
@@ -550,6 +539,6 @@ describe('createSyncController stop', () => {
     controller.reSync()
 
     expect(replication.reSync).not.toHaveBeenCalled()
-    expect(log.errors).toHaveLength(1)
+    expect(logged('error')).toHaveLength(1)
   })
 })

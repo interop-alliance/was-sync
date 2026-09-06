@@ -23,12 +23,14 @@ src/index.ts             The "." door: RxDB-free, in the module graph AND in
                          the emitted declarations
 src/types.ts             The wire and replica shapes, the port interfaces, the
                          opaque-body equality, the optional-field copy, the LWW
-                         stamp accessor, the log port
+                         stamp accessor
 src/syncedDocSchema.ts   The one replica schema, returned as a structural type
 src/conflictHandler.ts   The RxDB conflict-handler seam (injected decision) and
                          its last-write-wins default resolver
 src/writerId.ts          The writer-id mint and clear, over an injected storage
                          port and a required key prefix
+src/log.ts               The logging seam: the locally declared Logger port,
+                         setLogger, and the console fallback
 
 src/rxdb.ts              The "./rxdb" door: everything that needs the peer
 src/changesQuery.ts      The pull handler and the wire-to-replica mapping
@@ -133,17 +135,22 @@ numbered so items and reviews can cite them.
     platform with no reachability signal would never poll. `pollMs` is required
     for the same reason a default would be wrong: two consumers poll at
     different rates.
-13. **Diagnostics ride the consumer's logging seam.** The controller core, the
-    conflict-handler factory, and the default resolver each take an injected
-    `{ warn, error }` port, defaulting to no-op. The three undecryptable-side
-    warnings are the only signal that a conflict was settled by presuming one
-    side newer rather than by comparing stamps, and a resolver that throws is
-    the handler's own one thing to say (RxDB treats a failed resolution as
-    fatal), so both must reach the app's own logger rather than a bare console.
-    The port's metadata argument is `Record<string, unknown>` rather than
-    `object`, because a parameter type is checked contravariantly and the
-    narrower one would force every consumer to wrap its namespaced logger in
-    adapter closures.
+13. **Diagnostics ride the package's own logging seam.** All diagnostics leave
+    through `src/log.ts`: a locally declared `Logger` port and `setLogger`. An
+    app wires a logger once at bootstrap, under one namespace for the whole
+    package (`setLogger(createLogger('sync'))`), the same library-port
+    convention used across the ecosystem (decision 0004 in the logging package's
+    own repo). The port is declared locally rather than imported, so the
+    published declarations name no `@interop/logger` specifier.
+    `@interop/logger` is a type-only devDependency: an eslint rule blocks a
+    value import in `src/`, and `test/packaging/` greps `dist/` for the
+    specifier. A test pins the local `Logger` type to the package's own. The
+    undecryptable-side warnings and a resolver that throws are the two signals
+    that must reach the app's logger; RxDB treats a failed resolution as fatal.
+    The driver's swallow points reach it too now: the best-effort ack write-back
+    logs its failure at `warn`, and the benign-412 delete re-issue and a
+    conflict entry handed back to RxDB each log at `debug`. The old per-call
+    port could not reach those points.
 14. **The root entry never reaches `rxdb`.** Neither at runtime nor in its
     emitted declarations. A missing package is a resolution failure rather than
     something a bundler drops, and every consumer compiles with `skipLibCheck`,
@@ -206,9 +213,11 @@ the byoe-ecosystem layer map instead.
   Contrast the **engine** (`@interop/wallet-core/sync`), the replica-less
   implementation a mobile wallet drives. Avoid: adapter, sync layer.
 - **Port** -- an injected seam the driver depends on rather than implements: the
-  `WasSyncPort` (WAS access), the storage port (the writer-id mint), the
-  schedule and online source (the controller), and the log port. Avoid:
-  provider, service.
+  `WasSyncPort` (WAS access), the storage port (the writer-id mint), and the
+  schedule and online source (the controller). Avoid: provider, service.
+- **Logging seam** -- `src/log.ts`: the locally declared `Logger` port and
+  `setLogger`; the one place the package's diagnostics leave through. Avoid: log
+  port, SyncLogPort, logger option.
 - **Primary state** -- the server's current state of one resource, as re-read
   for the 412 conflict path (`PrimaryState`, `withFeedPrimaryRead`). RxDB's own
   field names on a push row (`assumedMasterState`, `realMasterState`) are RxDB's

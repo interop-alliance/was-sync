@@ -5,10 +5,10 @@
 `@interop/was-sync` is the WAS replication driver for RxDB: the changes-feed
 pull handler, the conditional-write push handler with its conflict assembler and
 benign-412 delete retry, the conflict-handler seam, the synced-document schema,
-the writer-id mint, and the session controller core. It was extracted from the
-two copies that had drifted apart in `@interop/was-react` (`src/sync/`) and in
-the Freewallet browser wallet (`src/lib/sync/`), neither of which may depend on
-the other. The placement is recorded in
+the writer-id mint, the logging seam, and the session controller core. It was
+extracted from the two copies that had drifted apart in `@interop/was-react`
+(`src/sync/`) and in the Freewallet browser wallet (`src/lib/sync/`), neither of
+which may depend on the other. The placement is recorded in
 [decisions/0001](decisions/0001-rxdb-replication-driver-package.md) and the
 current shape in [ARCHITECTURE.md](ARCHITECTURE.md) -- read both before making
 changes.
@@ -234,7 +234,9 @@ isomorphic-lib-template, not here.
 Two conventions this package leans on hardest, both ARCHITECTURE.md invariants:
 cross-package errors are matched by `err.name` and never with `instanceof`
 (invariant 5), and no `rxdb` import of any kind -- a type import included -- may
-appear anywhere the root entry reaches (invariant 14).
+appear anywhere the root entry reaches (invariant 14). `@interop/logger` is a
+type-only devDependency; the runtime port is `src/log.ts`, and nothing in `src/`
+may value-import the package (invariant 13).
 
 ## Ecosystem conventions
 

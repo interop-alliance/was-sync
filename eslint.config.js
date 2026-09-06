@@ -60,5 +60,30 @@ export default defineConfig([
     rules: {
       'no-restricted-imports': ['error', { patterns: noTestingFixtures }]
     }
+  },
+  // The logging seam is a type-only devDependency (decision 0004 in the
+  // @interop/logger repo): a value import would ship a runtime dependency
+  // and, under link: dev setups, resolve to a second copy with its own
+  // sink registry, silently splitting events away from the app's sinks.
+  // src/log.ts is the stated exception in that it declares the port locally
+  // and imports nothing from the package at all.
+  {
+    files: ['src/**/*.ts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@interop/logger'],
+              allowTypeImports: true,
+              message:
+                'Only `import type` from @interop/logger in src/ -- the ' +
+                'runtime port is src/log.ts (setLogger).'
+            }
+          ]
+        }
+      ]
+    }
   }
 ])

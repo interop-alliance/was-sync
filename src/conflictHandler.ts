@@ -24,13 +24,8 @@
  */
 import { remotePayloadWins } from '@interop/social-core'
 import { bodiesEqual, lwwFields } from './types.js'
-import type {
-  Json,
-  LwwFields,
-  SyncedDoc,
-  SyncLogPort,
-  WithDeleted
-} from './types.js'
+import type { Json, LwwFields, SyncedDoc, WithDeleted } from './types.js'
+import { log } from './log.js'
 
 /**
  * The three states RxDB hands a conflict resolver: the state the server holds,
@@ -98,26 +93,23 @@ export function statesEqual(
  * treats a failed conflict resolution as a fatal replication error rather than
  * a retryable one, and the reason lives inside the injected decision (a cipher
  * that is gone, a comparator that met a shape it did not expect), so the
- * failure is logged through the injected port with the row it happened on
- * before it propagates. Nothing else here logs: which side won is the
- * resolver's story to tell, and the default resolver tells it.
+ * failure is logged with the row it happened on before it propagates.
+ * Nothing else here logs: which side won is the resolver's story to tell, and
+ * the default resolver tells it.
  *
  * @param options {object}
  * @param options.resolve {(input: ConflictInput) => Promise<ConflictWinner>}
  *   the app's decision; see {@link lwwResolver} for the default
  * @param [options.isEqual] {(a, b) => boolean}   defaults to
  *   {@link statesEqual}
- * @param [options.log] {SyncLogPort}   defaults to a no-op
  * @returns {ConflictHandler}
  */
 export function makeConflictHandler({
   resolve,
-  isEqual = statesEqual,
-  log
+  isEqual = statesEqual
 }: {
   resolve: (input: ConflictInput) => Promise<ConflictWinner>
   isEqual?: (a: WithDeleted<SyncedDoc>, b: WithDeleted<SyncedDoc>) => boolean
-  log?: SyncLogPort
 }): ConflictHandler {
   return {
     isEqual,
@@ -126,7 +118,7 @@ export function makeConflictHandler({
       try {
         winner = await resolve(input)
       } catch (err) {
-        log?.error('Conflict resolution failed; the replication cycle fails', {
+        log.error('Conflict resolution failed; the replication cycle fails', {
           id: input.realMasterState.id,
           err
         })
@@ -206,9 +198,9 @@ async function lwwFieldsOf(
  *    not absent. An undecryptable remote is adopted (never re-pushed over with
  *    the possibly-older local payload); an undecryptable local row is
  *    re-asserted (the user's edit is not silently dropped); both undecryptable
- *    adopts the remote (deterministic and convergent). Each case is logged
- *    through the injected port -- distinguishable from the intended
- *    tombstone/absent-body `none` the remaining rules were written for.
+ *    adopts the remote (deterministic and convergent). Each case is logged at
+ *    `warn` -- distinguishable from the intended tombstone/absent-body `none`
+ *    the remaining rules were written for.
  * 4. Both sides carry an LWW payload: pure payload LWW via `payloadWins`.
  * 5. A live local edit against an incomparable remote (a remote tombstone, say):
  *    the edit wins and is re-pushed (resurrection).
@@ -222,17 +214,14 @@ async function lwwFieldsOf(
  * @param [options.payloadWins] {(remote: LwwFields, local: LwwFields) => boolean}
  *   the total-order comparator; defaults to social-core's `remotePayloadWins`
  *   (later `updatedAt` wins, `writerId` breaks a tie)
- * @param [options.log] {SyncLogPort}   defaults to a no-op
  * @returns {(input: ConflictInput) => Promise<ConflictWinner>}
  */
 export function lwwResolver({
   decrypt,
-  payloadWins = remotePayloadWins,
-  log
+  payloadWins = remotePayloadWins
 }: {
   decrypt: (envelope: Json) => Promise<Json>
   payloadWins?: (remote: LwwFields, local: LwwFields) => boolean
-  log?: SyncLogPort
 }): (input: ConflictInput) => Promise<ConflictWinner> {
   return async function resolve({
     realMasterState,
@@ -265,7 +254,7 @@ export function lwwResolver({
     // Rule 3 -- an undecryptable side is presumed newer rather than absent.
     if (remote.kind === 'undecryptable' || local.kind === 'undecryptable') {
       if (remote.kind === 'undecryptable' && local.kind !== 'undecryptable') {
-        log?.warn(
+        log.warn(
           'LWW conflict: the remote state did not decrypt; adopting it ' +
             'rather than re-pushing the local payload over it.',
           { id: realMasterState.id, err: remote.err }
@@ -273,14 +262,14 @@ export function lwwResolver({
         return 'remote'
       }
       if (local.kind === 'undecryptable' && remote.kind !== 'undecryptable') {
-        log?.warn(
+        log.warn(
           'LWW conflict: the local row did not decrypt; re-asserting it ' +
             'rather than dropping the local edit for the remote state.',
           { id: newDocumentState.id, err: local.err }
         )
         return 'local'
       }
-      log?.warn(
+      log.warn(
         'LWW conflict: neither side decrypted; adopting the remote state ' +
           '(deterministic and convergent).',
         {
@@ -310,8 +299,6 @@ export function lwwResolver({
  *
  * @param decrypt {(envelope: Json) => Promise<Json>}   this collection's decrypt
  * @param [payloadWins] {(remote: LwwFields, local: LwwFields) => boolean}
- * @param [log] {SyncLogPort}   passed to both halves: the resolver's
- *   undecryptable-side warnings and the handler's resolver-threw error
  * @returns {ConflictHandler}
  */
 export function makeLwwConflictHandler(
@@ -319,11 +306,7 @@ export function makeLwwConflictHandler(
   payloadWins: (
     remote: LwwFields,
     local: LwwFields
-  ) => boolean = remotePayloadWins,
-  log?: SyncLogPort
+  ) => boolean = remotePayloadWins
 ): ConflictHandler {
-  return makeConflictHandler({
-    resolve: lwwResolver({ decrypt, payloadWins, ...(log && { log }) }),
-    ...(log && { log })
-  })
+  return makeConflictHandler({ resolve: lwwResolver({ decrypt, payloadWins }) })
 }

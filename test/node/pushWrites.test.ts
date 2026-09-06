@@ -7,6 +7,7 @@
  * RxDB engine.
  */
 import { describe, it, expect } from 'vitest'
+import { captureLogger } from '@interop/logger'
 
 import {
   WasSyncAuthError,
@@ -16,6 +17,7 @@ import {
 } from '@interop/was-client/sync'
 import { createPushHandler, type PushWriteAck } from '../../src/pushWrites.js'
 import { withFeedPrimaryRead } from '../../src/feedPrimaryPort.js'
+import { setLogger } from '../../src/log.js'
 import type {
   PrimaryState,
   SyncedDoc,
@@ -975,17 +977,29 @@ describe('createPushHandler benign delete retry', () => {
     // the same content under a drifted revision, so the delete is re-issued.
     const port = driftingDeletePort({ serverVersion: 1, serverData: { a: 1 } })
     const push = createPushHandler(port)
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
 
-    const conflicts = await push([
-      {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
-        newDocumentState: newDoc({ version: 0, _deleted: true })
-      }
-    ])
+    try {
+      const conflicts = await push([
+        {
+          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+          newDocumentState: newDoc({ version: 0, _deleted: true })
+        }
+      ])
 
-    // No conflict reported: the resource is gone, under the fresh ETag.
-    expect(conflicts).toEqual([])
-    expect(port.deletes).toEqual([formatEtag(0), formatEtag(1)])
+      // No conflict reported: the resource is gone, under the fresh ETag.
+      expect(conflicts).toEqual([])
+      expect(port.deletes).toEqual([formatEtag(0), formatEtag(1)])
+      // The re-issue is a swallow point the seam makes visible, at debug.
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]).toMatchObject({
+        level: 'debug',
+        data: { id: 'r1', assumedVersion: 0, version: 1 }
+      })
+    } finally {
+      setLogger(previous)
+    }
   })
 
   it('retries when the re-read body differs from the assumed one only in key order', async () => {

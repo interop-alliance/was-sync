@@ -5,7 +5,8 @@
  * The `@interop/was-sync` root entry: the parts of the WAS replication driver
  * that carry no RxDB -- the synced-document wire and local shapes, the opaque
  * body helpers, the replica schema, the conflict-handler seam with its
- * last-write-wins default, and the writer-id mint.
+ * last-write-wins default, the writer-id mint, and the logging seam
+ * (`setLogger` and the `Logger` port) an app wires once at bootstrap.
  *
  * This entry is free of `rxdb` in its module graph AND in its emitted
  * declarations, so a consumer that reads shared collections without ever
@@ -28,12 +29,12 @@ export {
   type PrimaryState,
   type SyncCheckpoint,
   type SyncedDoc,
-  type SyncLogPort,
   type WasSyncBasePort,
   type WasSyncPort,
   type WireDoc,
   type WithDeleted
 } from './types.js'
+export { setLogger, type Logger } from './log.js'
 export { syncedDocSchema, type SyncedDocSchema } from './syncedDocSchema.js'
 export {
   lwwResolver,

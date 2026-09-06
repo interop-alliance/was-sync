@@ -20,15 +20,17 @@ import type { RxCollection } from 'rxdb/plugins/core'
 import type { SyncCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
 import { createPullHandler } from './changesQuery.js'
 import { createPushHandler, type PushWriteAck } from './pushWrites.js'
+import { log } from './log.js'
 
 /**
  * Builds the push write-back: patches an accepted write's acked server
  * revision(s) (`version` / `metaVersion`) into the local row so the next
  * conditional write's `If-Match` matches the server. Skips rows that are gone
  * or already current (a tombstoned row is invisible to `findOne` and needs no
- * write-back -- nothing further is pushed for a deleted id). Failures are
- * swallowed: the write itself succeeded, and a missed write-back only means
- * the acked revision is adopted from the change feed's echo on a later pull.
+ * write-back -- nothing further is pushed for a deleted id). A failure is
+ * logged at `warn` and swallowed: the write itself succeeded, and a missed
+ * write-back only means the acked revision is adopted from the change feed's
+ * echo on a later pull.
  *
  * @param rxCollection {RxCollection<SyncedDoc>}
  * @returns {(ack: PushWriteAck) => Promise<void>}
@@ -53,9 +55,13 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
       if (Object.keys(patch).length > 0) {
         await doc.incrementalPatch(patch)
       }
-    } catch {
+    } catch (err) {
       // Best-effort: the server write was accepted; the revision echo on the
       // next pull corrects the row if this local patch could not be applied.
+      log.warn('Could not write the acked revision back into the local row', {
+        id: ack.id,
+        err
+      })
     }
   }
 }

@@ -1,9 +1,11 @@
 /*!
  * Copyright (c) 2026 Interop Alliance. All rights reserved.
  */
-import { describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect } from 'vitest'
+import { captureLogger } from '@interop/logger'
 
 import type { Json, SyncedDoc, WithDeleted } from '../../src/types.js'
+import { setLogger } from '../../src/log.js'
 import {
   lwwResolver,
   makeConflictHandler,
@@ -77,29 +79,20 @@ function sealedRow(version = 0): WithDeleted<SyncedDoc> {
 const handler = makeLwwConflictHandler(decrypt)
 
 /**
- * A capture log port standing in for each consumer's namespaced logger. The
- * three undecryptable-side warnings are the only signal that a conflict was
- * settled by presuming one side newer rather than by comparing stamps, so they
- * are asserted rather than swallowed.
+ * The package's logging seam, captured per test. The three undecryptable-side
+ * warnings are the only signal that a conflict was settled by presuming one
+ * side newer rather than by comparing stamps, so they are asserted rather than
+ * swallowed.
  */
-function captureLog(): {
-  warn: (message: string, meta?: Record<string, unknown>) => void
-  error: (message: string, meta?: Record<string, unknown>) => void
-  warnings: string[]
-  errors: Array<{ message: string; meta?: Record<string, unknown> }>
-} {
-  const warnings: string[] = []
-  const errors: Array<{ message: string; meta?: Record<string, unknown> }> = []
-  return {
-    warnings,
-    errors,
-    warn: (message: string) => {
-      warnings.push(message)
-    },
-    error: (message: string, meta?: Record<string, unknown>) => {
-      errors.push({ message, ...(meta !== undefined && { meta }) })
-    }
-  }
+let capture = captureLogger('sync')
+
+beforeEach(() => {
+  capture = captureLogger('sync')
+  setLogger(capture.logger)
+})
+
+function logged(level: 'warn' | 'error') {
+  return capture.events.filter(event => event.level === level)
 }
 
 describe('makeLwwConflictHandler', () => {
@@ -278,24 +271,20 @@ describe('makeLwwConflictHandler', () => {
     // decrypt throws. It must NOT be scored as absent: an unreadable body is
     // presumed newer, so the primary is adopted and the older local payload is
     // not pushed over it.
-    const log = captureLog()
-    const logged = makeLwwConflictHandler(decrypt, undefined, log)
     const primary = sealedRow(2)
     const local = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
-    const winner = await logged.resolve({
+    const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: local
     })
     expect(winner).toBe(primary)
-    expect(log.warnings).toHaveLength(1)
+    expect(logged('warn')).toHaveLength(1)
   })
 
   it('re-asserts an undecryptable local row rather than dropping the local edit', async () => {
     // The mirror case: this replica cannot read its OWN row (e.g. it was
     // written under an epoch since rotated away). Dropping it for the primary
     // would silently lose the user's edit, so the local row is re-asserted.
-    const log = captureLog()
-    const logged = makeLwwConflictHandler(decrypt, undefined, log)
     const primary = row(
       { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' },
       {
@@ -303,25 +292,23 @@ describe('makeLwwConflictHandler', () => {
       }
     )
     const local = sealedRow(1)
-    const winner = await logged.resolve({
+    const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: local
     })
     expect(winner).toBe(local)
-    expect(log.warnings).toHaveLength(1)
+    expect(logged('warn')).toHaveLength(1)
   })
 
   it('adopts the primary when neither side decrypts', async () => {
-    const log = captureLog()
-    const logged = makeLwwConflictHandler(decrypt, undefined, log)
     const primary = sealedRow(2)
     const local = sealedRow(1)
-    const winner = await logged.resolve({
+    const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: local
     })
     expect(winner).toBe(primary)
-    expect(log.warnings).toHaveLength(1)
+    expect(logged('warn')).toHaveLength(1)
   })
 
   it('still treats a tombstone as absent, not as undecryptable', async () => {
@@ -329,11 +316,9 @@ describe('makeLwwConflictHandler', () => {
     // so the tombstone rules must still apply -- a live local edit beats a
     // remote tombstone, and a local tombstone loses to a real remote change --
     // with no warning logged.
-    const log = captureLog()
-    const logged = makeLwwConflictHandler(decrypt, undefined, log)
     const localEdit = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
     expect(
-      await logged.resolve({
+      await handler.resolve({
         realMasterState: row(null, { deleted: true, version: 3 }),
         newDocumentState: localEdit
       })
@@ -342,13 +327,13 @@ describe('makeLwwConflictHandler', () => {
     const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
     const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
     expect(
-      await logged.resolve({
+      await handler.resolve({
         realMasterState: primary,
         newDocumentState: row(null, { deleted: true }),
         assumedMasterState: assumed
       })
     ).toBe(primary)
-    expect(log.warnings).toEqual([])
+    expect(logged('warn')).toEqual([])
   })
 
   it('re-asserts a local tombstone against a remote tombstone race (both deleted)', async () => {
@@ -427,17 +412,15 @@ describe('makeConflictHandler', () => {
     )
   })
 
-  it('logs a resolver that throws through the injected port, then rethrows', async () => {
+  it('logs a resolver that throws through the seam, then rethrows', async () => {
     // RxDB treats a failed conflict resolution as fatal rather than
     // retryable, and the reason lives inside the injected decision, so the
-    // handler says so through the consumer's own logger on the way out.
-    const log = captureLog()
+    // handler says so through the app's logger on the way out.
     const boom = new Error('the cipher is gone')
     const handlerWithResolver = makeConflictHandler({
       resolve: async () => {
         throw boom
-      },
-      log
+      }
     })
     const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
     await expect(
@@ -446,31 +429,18 @@ describe('makeConflictHandler', () => {
         newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
       })
     ).rejects.toBe(boom)
-    expect(log.errors).toHaveLength(1)
-    expect(log.errors[0]?.meta).toMatchObject({ id: 'r1', err: boom })
-
-    // With no port supplied the same failure propagates silently.
-    await expect(
-      makeConflictHandler({
-        resolve: async () => {
-          throw boom
-        }
-      }).resolve({
-        realMasterState: remote,
-        newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
-      })
-    ).rejects.toBe(boom)
+    expect(logged('error')).toHaveLength(1)
+    // The capture logger lifts `data.err` to the event's top-level `err`.
+    expect(logged('error')[0]).toMatchObject({ data: { id: 'r1' }, err: boom })
   })
 
-  it('carries the log port down to the packaged resolver as well', async () => {
-    const log = captureLog()
-    const handlerWithLog = makeLwwConflictHandler(decrypt, undefined, log)
-    await handlerWithLog.resolve({
+  it('warns from the packaged resolver at warn, not error', async () => {
+    await handler.resolve({
       realMasterState: sealedRow(2),
       newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
     })
-    expect(log.warnings).toHaveLength(1)
-    expect(log.errors).toEqual([])
+    expect(logged('warn')).toHaveLength(1)
+    expect(logged('error')).toEqual([])
   })
 
   it('keeps the default isEqual, and takes an injected one', () => {
@@ -518,23 +488,15 @@ describe('lwwResolver undecryptable scoring', () => {
     ).resolves.toBe('local')
   })
 
-  it('warns through the injected port with no logger reaching the console', async () => {
-    const log = captureLog()
-    const resolve = lwwResolver({ decrypt, log })
-    await resolve({
-      realMasterState: sealedRow(2),
-      newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
-    })
-    expect(log.warnings).toHaveLength(1)
-    expect(log.warnings[0]).toContain('did not decrypt')
-
-    // With no port supplied the same conflict settles the same way silently.
-    const silent = lwwResolver({ decrypt })
+  it('warns through the seam with nothing reaching the console', async () => {
+    const resolve = lwwResolver({ decrypt })
     await expect(
-      silent({
+      resolve({
         realMasterState: sealedRow(2),
         newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
       })
     ).resolves.toBe('remote')
+    expect(logged('warn')).toHaveLength(1)
+    expect(logged('warn')[0]?.msg).toContain('did not decrypt')
   })
 })
