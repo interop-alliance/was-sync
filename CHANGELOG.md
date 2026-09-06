@@ -2,6 +2,15 @@
 
 ## 0.1.2 - TBD
 
+### Changed
+
+- **Breaking:** `FakeWasServer` is removed from `@interop/was-sync/testing`. The
+  integration suite now runs against a live in-process `was-teaching-server`
+  through the real `createWasSyncPort` from `@interop/was-client`, so the
+  server's conditional-write, tombstone, and `changes`-feed behavior is
+  exercised rather than modeled (WS-11). The stub port and the memory schedule
+  and online source remain on the subpath.
+
 ### Fixed
 
 - The packaging suite (formerly `test:dist`) is now `test:packaging` and lives

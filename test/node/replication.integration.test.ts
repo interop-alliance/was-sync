@@ -3,20 +3,74 @@
  */
 /**
  * Integration test: drives the driver through a REAL RxDB collection (memory
- * storage) against the stateful in-memory fake server published on the
- * `./testing` subpath, proving the full replication machine -- schema,
- * checkpoint iteration, `deletedField`, push/pull round-trips -- rather than
- * the handlers in isolation.
+ * storage) against a REAL in-process was-teaching-server, over the sync port
+ * `@interop/was-client` builds (`createWasSyncPort`, default configuration).
+ * It proves the full replication machine -- schema, checkpoint iteration,
+ * `deletedField`, push/pull round-trips -- rather than the handlers in
+ * isolation, and it does so against the server's actual conditional-write,
+ * tombstone, and `changes`-feed behavior rather than a fake's reading of them.
+ *
+ * One server and one Space serve the whole file; each test provisions its own
+ * plaintext collection so no state crosses tests. Server-side observation goes
+ * through a second, independent port on the same collection, so an assertion
+ * about "what the server holds" never reads through the replica under test.
  */
-import { afterEach, describe, it, expect } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createRxDatabase, type RxDatabase } from 'rxdb/plugins/core'
 import { getRxStorageMemory } from 'rxdb/plugins/storage-memory'
+import { createApp, FileSystemBackend } from 'was-teaching-server'
+import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
+import { WasClient } from '@interop/was-client'
+import {
+  createWasSyncPort,
+  deriveSpaceId,
+  ensureSpaceAndCollection
+} from '@interop/was-client/sync'
 import { createWasReplication } from '../../src/wasReplication.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
-import { FakeWasServer } from '../../src/testing.js'
-import type { Json } from '../../src/types.js'
+import { lwwResolver, makeConflictHandler } from '../../src/conflictHandler.js'
+import type { Json, WasSyncPort } from '../../src/types.js'
 
+// A fixed 32-byte seed so the controller DID, and therefore the Space id, is
+// stable across runs; the data directory is fresh each run regardless.
+const SEED = new Uint8Array(32).map((_, index) => (index * 31 + 7) & 0xff)
+
+let dataDir: string
+let app: ReturnType<typeof createApp>
+let was: WasClient
+let spaceId: string
+let controllerDid: string
 let db: RxDatabase | undefined
+let collectionSerial = 0
+
+beforeAll(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), 'was-sync-integration-'))
+  // The port is not known until `listen()` resolves, so the app boots against
+  // a placeholder base URL and `serverUrl` is corrected before the first
+  // request; zcap invocation targets embed it, so it must match exactly.
+  app = createApp({
+    serverUrl: 'http://localhost',
+    backend: new FileSystemBackend({ dataDir, capacityBytes: Infinity })
+  })
+  await app.listen({ port: 0 })
+  const serverUrl = `http://localhost:${(app.server.address() as AddressInfo).port}`
+  app.serverUrl = serverUrl
+
+  const keyPair = await Ed25519VerificationKey.generate({ seed: SEED })
+  controllerDid = `did:key:${keyPair.fingerprint()}`
+  keyPair.id = `${controllerDid}#${keyPair.fingerprint()}`
+  was = WasClient.fromSigner({ serverUrl, signer: keyPair.signer() })
+  spaceId = deriveSpaceId(controllerDid)
+})
+
+afterAll(async () => {
+  await app.close()
+  await rm(dataDir, { recursive: true, force: true })
+})
 
 afterEach(async () => {
   if (db) {
@@ -25,7 +79,35 @@ afterEach(async () => {
   }
 })
 
-async function openCollection() {
+/**
+ * Provisions a fresh plaintext collection in the suite's Space and returns two
+ * independent ports on it: `port` for the replica under test and `observer`
+ * for the test's own reads and seeds.
+ */
+async function openServerCollection(): Promise<{
+  port: WasSyncPort
+  observer: WasSyncPort
+}> {
+  collectionSerial += 1
+  const collectionId = `synced-${collectionSerial}`
+  await ensureSpaceAndCollection({
+    was,
+    spaceId,
+    controllerDid,
+    collectionId,
+    encryption: 'plaintext'
+  })
+  const build = () =>
+    createWasSyncPort({ was, spaceId, collectionId }) as WasSyncPort
+  return { port: build(), observer: build() }
+}
+
+/**
+ * Opens a fresh memory-storage collection on the synced-document schema. With
+ * `lww` set, the package's last-write-wins conflict handler is installed over
+ * plaintext bodies; otherwise RxDB's default (remote wins) applies.
+ */
+async function openCollection({ lww = false }: { lww?: boolean } = {}) {
   db = await createRxDatabase({
     name: 'synctest' + Math.floor(performance.now()).toString(36),
     storage: getRxStorageMemory(),
@@ -33,10 +115,24 @@ async function openCollection() {
   })
   const { synced } = await db.addCollections({
     synced: {
-      schema: syncedDocSchema()
+      schema: syncedDocSchema(),
+      ...(lww && {
+        conflictHandler: makeConflictHandler({
+          resolve: lwwResolver({ decrypt: async envelope => envelope })
+        })
+      })
     }
   })
   return synced
+}
+
+/**
+ * The `step` marker of a plaintext body, or `undefined` for anything else.
+ */
+function stepOf(data: Json | undefined): unknown {
+  return typeof data === 'object' && data !== null && !Array.isArray(data)
+    ? data.step
+    : undefined
 }
 
 /**
@@ -47,23 +143,23 @@ async function eventually(
   predicate: () => boolean | Promise<boolean>,
   nudge?: () => void
 ): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  for (let attempt = 0; attempt < 200; attempt++) {
     if (await predicate()) {
       return
     }
     nudge?.()
-    await new Promise(resolve => setTimeout(resolve, 20))
+    await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error('Condition not met within timeout.')
 }
 
-describe('WAS replication (RxDB + fake server)', () => {
+describe('WAS replication (RxDB + live was-teaching-server)', () => {
   it('pushes a locally-inserted document to the server', async () => {
     const collection = await openCollection()
-    const server = new FakeWasServer()
+    const { port, observer } = await openServerCollection()
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: server.port(),
+      wasPort: port,
       replicationIdentifier: 'test-push'
     })
     await replication.awaitInitialReplication()
@@ -75,20 +171,22 @@ describe('WAS replication (RxDB + fake server)', () => {
       data: { hello: 'world' }
     })
 
-    await eventually(() => server.has('cid-1'))
-    expect(server.dataFor('cid-1')).toEqual({ hello: 'world' })
+    await eventually(async () => (await observer.get({ id: 'cid-1' })) !== null)
+    const primary = await observer.get({ id: 'cid-1' })
+    expect(primary?.data).toEqual({ hello: 'world' })
+    expect(primary?.version).toBeGreaterThanOrEqual(1)
 
     await replication.cancel()
   })
 
   it('pulls a server-side document into the local collection', async () => {
     const collection = await openCollection()
-    const server = new FakeWasServer()
-    server.seed('cid-remote', { from: 'server' })
+    const { port, observer } = await openServerCollection()
+    await observer.putContent({ id: 'cid-remote', data: { from: 'server' } })
 
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: server.port(),
+      wasPort: port,
       replicationIdentifier: 'test-pull'
     })
     await replication.awaitInitialReplication()
@@ -101,10 +199,10 @@ describe('WAS replication (RxDB + fake server)', () => {
 
   it('round-trips the key-epoch id: a local epoch-stamped doc pushes and pulls back with it intact', async () => {
     const collection = await openCollection()
-    const server = new FakeWasServer()
+    const { port, observer } = await openServerCollection()
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: server.port(),
+      wasPort: port,
       replicationIdentifier: 'test-epoch-roundtrip'
     })
     await replication.awaitInitialReplication()
@@ -119,10 +217,13 @@ describe('WAS replication (RxDB + fake server)', () => {
 
     // Push carries the epoch to the server (its `Key-Epoch` stamp).
     await eventually(
-      () => server.epochFor('cid-epoch') === 'epoch-1',
+      async () =>
+        (await observer.get({ id: 'cid-epoch' }))?.epoch === 'epoch-1',
       () => replication.reSync()
     )
-    expect(server.dataFor('cid-epoch')).toEqual({ hello: 'world' })
+    expect((await observer.get({ id: 'cid-epoch' }))?.data).toEqual({
+      hello: 'world'
+    })
 
     // ...and the epoch pulls back down the feed onto the local document.
     await eventually(
@@ -134,19 +235,25 @@ describe('WAS replication (RxDB + fake server)', () => {
     )
     const doc = await collection.findOne('cid-epoch').exec()
     expect(doc?.toJSON().epoch).toBe('epoch-1')
+
+    await replication.cancel()
   })
 
   it('replicates an epoch-stamped opaque envelope verbatim with no cipher (locked vault still syncs)', async () => {
     const collection = await openCollection()
-    const server = new FakeWasServer()
+    const { port, observer } = await openServerCollection()
     // An opaque EDV-style envelope the replicating reader cannot decrypt: the
-    // sync layer never touches keys, so it moves the body and its epoch verbatim.
+    // driver never touches keys, so it moves the body and its epoch verbatim.
     const envelope: Json = { jwe: { ciphertext: 'opaque', protected: 'hdr' } }
-    server.seed('cid-sealed', envelope, 'epoch-7')
+    await observer.putContent({
+      id: 'cid-sealed',
+      data: envelope,
+      epoch: 'epoch-7'
+    })
 
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: server.port(),
+      wasPort: port,
       replicationIdentifier: 'test-epoch-pull'
     })
     await replication.awaitInitialReplication()
@@ -160,10 +267,10 @@ describe('WAS replication (RxDB + fake server)', () => {
 
   it('replicates a local delete as a server tombstone', async () => {
     const collection = await openCollection()
-    const server = new FakeWasServer()
+    const { port, observer } = await openServerCollection()
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: server.port(),
+      wasPort: port,
       replicationIdentifier: 'test-delete'
     })
     await replication.awaitInitialReplication()
@@ -180,7 +287,10 @@ describe('WAS replication (RxDB + fake server)', () => {
     await eventually(
       async () => {
         const current = await collection.findOne('cid-del').exec()
-        return server.has('cid-del') && (current?.toJSON().version ?? 0) >= 1
+        return (
+          (await observer.get({ id: 'cid-del' })) !== null &&
+          (current?.toJSON().version ?? 0) >= 1
+        )
       },
       () => replication.reSync()
     )
@@ -188,11 +298,185 @@ describe('WAS replication (RxDB + fake server)', () => {
     const doc = await collection.findOne('cid-del').exec()
     await doc!.remove()
 
+    // The plain port reads a tombstone as `null`, the same as an absence.
     await eventually(
-      () => !server.has('cid-del'),
+      async () => (await observer.get({ id: 'cid-del' })) === null,
       () => replication.reSync()
     )
-    expect(server.has('cid-del')).toBe(false)
+    expect(await observer.get({ id: 'cid-del' })).toBeNull()
+
+    await replication.cancel()
+  })
+
+  it('pulls a server-side tombstone as a local delete', async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const version = await observer.putContent({
+      id: 'cid-gone',
+      data: { from: 'server' }
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-pull-tombstone'
+    })
+    await replication.awaitInitialReplication()
+    expect(await collection.findOne('cid-gone').exec()).not.toBeNull()
+
+    // The other writer deletes it; the tombstone rides the feed down.
+    await observer.deleteContent({ id: 'cid-gone', ifMatch: `"${version}"` })
+    await eventually(
+      async () => (await collection.findOne('cid-gone').exec()) === null,
+      () => replication.reSync()
+    )
+
+    await replication.cancel()
+  })
+
+  it('pulls a feed longer than one page', async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const count = 7
+    for (let index = 0; index < count; index++) {
+      await observer.putContent({ id: `cid-page-${index}`, data: { index } })
+    }
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-paging',
+      batchSize: 3
+    })
+    await replication.awaitInitialReplication()
+    await eventually(
+      async () => (await collection.find().exec()).length === count,
+      () => replication.reSync()
+    )
+
+    const docs = await collection.find().exec()
+    expect(docs.map(doc => doc.toJSON().id).sort()).toEqual(
+      Array.from({ length: count }, (_, index) => `cid-page-${index}`).sort()
+    )
+
+    await replication.cancel()
+  })
+
+  it('stamps the server-assigned createdBy on a pushed document', async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-created-by'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-author',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { hello: 'world' }
+    })
+    await eventually(
+      async () => (await observer.get({ id: 'cid-author' })) !== null
+    )
+
+    const primary = await observer.get({ id: 'cid-author' })
+    expect(primary?.createdBy).toBe(controllerDid)
+
+    await replication.cancel()
+  })
+
+  it('pushes a custom-metadata edit as a /meta write', async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-meta'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-meta',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { hello: 'world' },
+      // A plaintext collection's `custom` is the `{ name, tags }` shape, with
+      // `tags` a string-to-string record.
+      custom: { name: 'Starred', tags: { starred: 'yes' } }
+    })
+    await eventually(
+      async () => (await observer.get({ id: 'cid-meta' }))?.custom !== undefined
+    )
+
+    const primary = await observer.get({ id: 'cid-meta' })
+    expect(primary?.custom).toEqual({
+      name: 'Starred',
+      tags: { starred: 'yes' }
+    })
+    expect(primary?.data).toEqual({ hello: 'world' })
+
+    await replication.cancel()
+  })
+
+  it('resolves a stale If-Match (412) by last write wins and converges', async () => {
+    const collection = await openCollection({ lww: true })
+    const { port, observer } = await openServerCollection()
+    // The LWW payload (`updatedAt`, `writerId`) travels inside `data`.
+    const version = await observer.putContent({
+      id: 'cid-race',
+      data: {
+        step: 'server-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-412'
+    })
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-race').exec()
+    expect(stepOf(pulled?.toJSON().data)).toBe('server-1')
+
+    // Another writer bumps the resource behind the replica's back, so the
+    // replica's next push carries a stale If-Match and the server answers 412.
+    await observer.putContent({
+      id: 'cid-race',
+      data: {
+        step: 'server-2',
+        updatedAt: '2026-01-01T00:00:02Z',
+        writerId: 'b'
+      },
+      ifMatch: `"${version}"`
+    })
+    await pulled!.incrementalPatch({
+      data: {
+        step: 'local-2',
+        updatedAt: '2026-01-01T00:00:03Z',
+        writerId: 'a'
+      },
+      updatedAt: '000000000003'
+    })
+
+    // The local payload is the later write, so it lands over the server's.
+    await eventually(
+      async () =>
+        stepOf((await observer.get({ id: 'cid-race' }))?.data) === 'local-2',
+      () => replication.reSync()
+    )
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-race').exec()
+        const primary = await observer.get({ id: 'cid-race' })
+        return current?.toJSON().version === primary?.version
+      },
+      () => replication.reSync()
+    )
 
     await replication.cancel()
   })

@@ -78,11 +78,12 @@ The writer id is an unkeyed, clearable, unrecoverable attribution label, never
 an identity: it derives from no secret, and it can vanish and be re-minted with
 nothing carried over.
 
-Test fixtures ship on the `@interop/was-sync/testing` subpath. They are for
-tests only: `FakeWasServer` accepts every write and serves a plausible `changes`
-feed, so an app that imported it would show a healthy sync status over a replica
-writing nothing to WAS. Keep the subpath out of production import globs (an
-eslint `no-restricted-imports` pattern is what each consumer uses).
+Test fixtures ship on the `@interop/was-sync/testing` subpath: a stub sync port
+and memory implementations of the controller's timer and reachability ports.
+They are for tests only. Keep the subpath out of production import globs (an
+eslint `no-restricted-imports` pattern is what each consumer uses). There is no
+fake WAS server; the integration suite runs against a live in-process
+`was-teaching-server`.
 
 ## Install
 

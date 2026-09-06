@@ -41,8 +41,8 @@ src/controller.ts        The controller core: the serialized lifecycle, the
                          per-collection replications, status, auth escalation,
                          polling, reachability
 
-src/testing.ts           The "./testing" door: FakeWasServer, the stub port, and
-                         the memory schedule and online source
+src/testing.ts           The "./testing" door: the stub port, and the memory
+                         schedule and online source
 ```
 
 Dependency direction is strictly downward. The runtime dependencies are
@@ -144,11 +144,16 @@ numbered so items and reviews can cite them.
     so a surviving `import type` would degrade to a silent error type. The
     schema and the conflict handler therefore declare structural types of their
     own. `test/packaging/` walks the built graph and asserts it.
-15. **`./testing` is test-only.** `FakeWasServer` accepts every write and serves
-    a plausible feed, so a production import would show a healthy sync status
-    over a replica writing nothing to WAS. The eslint config keeps `src/` off
-    it, and each consumer keeps the same restriction on its own production
-    globs.
+15. **`./testing` is test-only, and holds no fake server.** The stub port
+    refuses every call and the memory ports never fire on their own, so a
+    production import would leave a replica that never syncs. The eslint config
+    keeps `src/` off it, and each consumer keeps the same restriction on its own
+    production globs. The integration suite runs against a live in-process
+    `was-teaching-server` through the real was-client port rather than a fake: a
+    fake is a second implementation of the WAS contract, and the one this
+    package started with hid bugs by synthesizing a 412 for a header-less
+    DELETE, never assigning `createdBy`, and raising error shapes the default
+    port does not.
 
 ## Ownership heuristics
 

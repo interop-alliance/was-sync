@@ -31,9 +31,14 @@ other half.
 
 The `./testing` subpath (`src/testing.ts`) is test fixtures only; never import
 it from production code (an eslint rule enforces that inside `src/`, and each
-consumer keeps the same restriction). `FakeWasServer` accepts every write and
-serves a plausible feed, so a production import would show a healthy sync status
-over a replica writing nothing to WAS.
+consumer keeps the same restriction). The stub port refuses every call and the
+memory ports never fire on their own, so a production import would leave a
+replica that never syncs. There is no fake WAS server: the integration suite
+runs against a live in-process `was-teaching-server` (a devDependency from the
+registry), so the server's real conditional-write, tombstone, and feed behavior
+is what the driver is tested against. A fake would be a second implementation of
+the WAS contract maintained here, and the one this package started with had
+already drifted from the server in ways that hid bugs.
 
 ## Toolchain & Project Layout
 
@@ -61,8 +66,10 @@ Do not add test files to `tsconfig.json` — they would be emitted into `dist/`.
 
 - `test/node/` — Vitest unit tests (`pnpm run test:node`); run in Node, with no
   DOM anywhere. The push, pull, conflict, and feed-read suites drive fake ports;
-  the integration suite drives a real RxDB memory-storage collection against
-  `FakeWasServer` from `src/testing.ts`; the controller suite mocks
+  the integration suite drives a real RxDB memory-storage collection against a
+  live in-process `was-teaching-server`, over the real `createWasSyncPort` from
+  `@interop/was-client` on its default configuration, with one plaintext
+  collection provisioned per test; the controller suite mocks
   `wasReplication.js`, so it exercises the lifecycle without opening a database.
 - `test/packaging/` — the packaging suite (`pnpm run test:packaging`, which
   builds first and runs under `vitest.packaging.config.ts`). It walks the
