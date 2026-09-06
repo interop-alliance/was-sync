@@ -70,7 +70,7 @@ jspm_packages/
 !/.vscode/settings.json
 
 # Output
-dist
+/dist
 
 # Playwright
 playwright-report/

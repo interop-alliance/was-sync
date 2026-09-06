@@ -39,8 +39,8 @@ jobs:
 
       # Walks the emitted module and declaration graphs, so it runs against the
       # build above rather than against src/.
-      - name: Test (built output)
-        run: pnpm run test:dist
+      - name: Test (packaging)
+        run: pnpm run test:packaging
 
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium

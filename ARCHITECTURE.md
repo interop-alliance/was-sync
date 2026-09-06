@@ -143,7 +143,7 @@ numbered so items and reviews can cite them.
     something a bundler drops, and every consumer compiles with `skipLibCheck`,
     so a surviving `import type` would degrade to a silent error type. The
     schema and the conflict handler therefore declare structural types of their
-    own. `test/dist/` walks the built graph and asserts it.
+    own. `test/packaging/` walks the built graph and asserts it.
 15. **`./testing` is test-only.** `FakeWasServer` accepts every write and serves
     a plausible feed, so a production import would show a healthy sync status
     over a replica writing nothing to WAS. The eslint config keeps `src/` off

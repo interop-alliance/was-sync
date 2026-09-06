@@ -13,11 +13,11 @@
     "prepare": "pnpm run build",
     "rebuild": "pnpm run clear && pnpm run build",
     "typecheck": "tsc -p tsconfig.dev.json",
-    "test": "pnpm run fix && pnpm run lint && pnpm run typecheck && pnpm run test:node && pnpm run test:dist && pnpm run test:browser",
+    "test": "pnpm run fix && pnpm run lint && pnpm run typecheck && pnpm run test:node && pnpm run test:packaging && pnpm run test:browser",
     "test:browser": "playwright test",
     "test:node": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:dist": "pnpm run build && vitest run --config vitest.dist.config.ts"
+    "test:packaging": "pnpm run build && vitest run --config vitest.packaging.config.ts"
   },
   "files": [
     "dist",

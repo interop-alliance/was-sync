@@ -1,5 +1,14 @@
 # @interop/was-sync Changelog
 
+## 0.1.2 - TBD
+
+### Fixed
+
+- The packaging suite (formerly `test:dist`) is now `test:packaging` and lives
+  in `test/packaging/`. The old `test/dist/` directory matched the unanchored
+  `dist` line in `.gitignore`, so the suite was never committed and CI failed
+  with "No test files found". The ignore entry is now anchored to `/dist`.
+
 ## 0.1.1 - 2026-09-05
 
 ### Added

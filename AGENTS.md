@@ -18,7 +18,7 @@ entry is free of `rxdb` in its module graph AND in its emitted declarations, so
 an app that never builds a replica resolves it with `rxdb` absent; `./rxdb`
 carries everything that needs the peer; `./testing` carries the fixtures. A
 change that puts an `rxdb` import (a type import included) anywhere the root
-entry reaches breaks the contract, and `test/dist/` is what catches it.
+entry reaches breaks the contract, and `test/packaging/` is what catches it.
 
 What does NOT belong here: WAS HTTP, the sync port, the wire vocabulary, the
 error classes, and the four `err.name` predicates (`@interop/was-client`, its
@@ -64,10 +64,11 @@ Do not add test files to `tsconfig.json` — they would be emitted into `dist/`.
   the integration suite drives a real RxDB memory-storage collection against
   `FakeWasServer` from `src/testing.ts`; the controller suite mocks
   `wasReplication.js`, so it exercises the lifecycle without opening a database.
-- `test/dist/` — the built-output suite (`pnpm run test:dist`, which builds
-  first and runs under `vitest.dist.config.ts`). It walks the emitted module and
-  declaration graphs to hold the root entry free of `rxdb` (ARCHITECTURE.md
-  invariant 14). It is not part of `test:node`, because it asserts over `dist/`.
+- `test/packaging/` — the packaging suite (`pnpm run test:packaging`, which
+  builds first and runs under `vitest.packaging.config.ts`). It walks the
+  emitted module and declaration graphs to hold the root entry free of `rxdb`
+  (ARCHITECTURE.md invariant 14). It is not part of `test:node`, because it
+  asserts over `dist/`.
 - `test/browser/` — Playwright smoke test (`pnpm run test:browser`); loads the
   ROOT entry in real Chromium via a Vite dev server (`pnpm run dev`), which is
   the entry a consumer must be able to load with `rxdb` absent.
