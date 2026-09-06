@@ -1,77 +1,227 @@
 # Architecture
 
-The current shape of this library, with the rationale inline: why each
-part is shaped the way it is, stated where the shape is described.
-This file is kept current in the same change set that alters the
-shape; it overwrites in place and records no history. History lives
-elsewhere: CHANGELOG.md for what landed, `decisions/` for durable
-decisions with their rejected alternatives and revisit criteria, and
-the archived roadmap for the work items. Reference decision records
-from here where the resulting shape is described, instead of
-re-arguing them.
-
-Several conventions lean on this file, so keep it accurate and current:
-the design gate defines a cross-cutting item as one touching an
-invariant documented here, a `touches:` entry names this file as a
-deliverable in its own right, and the breaking-release audit checks
-its statements against the code.
-
-This template copy is a skeleton. Replace the section bodies as the
-library takes shape; keep the sections. Delete this paragraph and the
-two above's template framing when scaffolding a real repo.
+The current shape of this library, with the rationale inline: why each part is
+shaped the way it is, stated where the shape is described. This file is kept
+current in the same change set that alters the shape; it overwrites in place and
+records no history. History lives elsewhere: CHANGELOG.md for what landed,
+`decisions/` for durable decisions with their rejected alternatives and revisit
+criteria, and the archived roadmap for the work items. Reference decision
+records from here where the resulting shape is described, instead of re-arguing
+them.
 
 ## Layer map
 
-The module tour: what lives where, and the dependency direction
-between the parts. One line per module or directory is enough while
-the library is small.
+`@interop/was-sync` is the WAS replication driver for RxDB. The placement --
+what lives here, and what stays in was-client, social-core, wallet-core, and
+each consuming app -- is decision
+[0001](decisions/0001-rxdb-replication-driver-package.md).
+
+Three entries, and the split between them is part of the contract.
 
 ```
-src/index.ts        Public entry point (the export map's only door)
-src/Example.ts      Example class (replace with real modules)
+src/index.ts             The "." door: RxDB-free, in the module graph AND in
+                         the emitted declarations
+src/types.ts             The wire and replica shapes, the port interfaces, the
+                         opaque-body equality, the optional-field copy, the LWW
+                         stamp accessor, the log port
+src/syncedDocSchema.ts   The one replica schema, returned as a structural type
+src/conflictHandler.ts   The RxDB conflict-handler seam (injected decision) and
+                         its last-write-wins default resolver
+src/writerId.ts          The writer-id mint and clear, over an injected storage
+                         port and a required key prefix
+
+src/rxdb.ts              The "./rxdb" door: everything that needs the peer
+src/changesQuery.ts      The pull handler and the wire-to-replica mapping
+src/pushWrites.ts        The push handler: write routing, the benign-412 delete
+                         retry, the conflict assembler, the write acks
+src/wasReplication.ts    The replicateRxCollection wiring and the ack write-back
+src/feedPrimaryPort.ts   The opt-in feed-backed conflict re-read (a server that
+                         hides the ETag behind CORS)
+src/controller.ts        The controller core: the serialized lifecycle, the
+                         per-collection replications, status, auth escalation,
+                         polling, reachability
+
+src/testing.ts           The "./testing" door: FakeWasServer, the stub port, and
+                         the memory schedule and online source
 ```
+
+Dependency direction is strictly downward. The runtime dependencies are
+`@interop/social-core` (the last-write-wins comparison), `json-canonicalize`
+(the JCS body equality), and `uuidv7` (the writer-id mint).
+`@interop/was-client` and `rxdb` are peers; `rxdb` is optional, since only
+`./rxdb` needs it. Nothing here depends on `@interop/wallet-core`, which is what
+keeps the conflict resolver an injected seam rather than a dependency.
 
 ## Invariants
 
-The rules the code upholds that a reader cannot infer from any one
-call site, numbered so items and reviews can cite them. Each entry
-states the rule, why it holds, and the code that upholds it. This
-list is what the design gate's invariant inventory walks; an
-undocumented invariant is unprotected by the gate.
+The rules the code upholds that a reader cannot infer from any one call site,
+numbered so items and reviews can cite them.
 
-1. (none yet)
+1. **Bodies are opaque.** `data` is the stored content body and `custom` the
+   stored metadata body; both move verbatim. Encrypting and decrypting are
+   read-time and write-time concerns above this layer, and the driver holds no
+   key material. The one decision that cannot be body-opaque, settling a
+   mutable-head conflict, is injected: `makeConflictHandler` takes a resolver,
+   and the default resolver takes a `decrypt` closure rather than a cipher
+   (`src/conflictHandler.ts`).
+2. **The driver mints no ids.** Row ids are the caller's, content-addressed and
+   identical on every replica; a resolved row keeps the `createdBy` the server
+   recorded. Two replicas therefore converge on the same rows without
+   coordinating.
+3. **Every content push carries the row's `Key-Epoch` stamp.** The stamp rides
+   `SyncedDoc.epoch` from the feed and back out through `putContent`; the header
+   itself belongs to was-client's port, and the policy for refreshing a stale
+   descriptor belongs to the consuming app.
+4. **The benign 412 delete retry.** A locally created row is pushed with the
+   revision it was inserted with while the server assigns its own, so a delete
+   conditional on a stale revision would be refused forever and leave the
+   resource live. A refused delete re-reads the resource, and a body unchanged
+   under a drifted revision is re-deleted against the fresh ETag; every other
+   412 is a real conflict (`src/pushWrites.ts`). The push-ack write-back only
+   makes the case rarer -- it is best-effort and swallows its own failure -- so
+   the retry stays the authority for deletes.
+5. **Cross-package errors match by `err.name`, never `instanceof`.** Every error
+   this driver classifies is was-client's, raised inside a seam the app injects,
+   and that seam can resolve to a second copy of was-client. The predicates come
+   from `@interop/was-client/sync` (was-client's
+   `decisions/0001-cross-package-errors-match-by-name.md`); reading `err.status`
+   after the name match is the intended shape. The controller's `isAuthError`
+   walks RxDB's error graph because RxDB serializes a thrown handler error to
+   plain JSON, so only the name survives.
+6. **JCS-canonical body equality.** `bodiesEqual` compares canonicalized JSON
+   rather than `JSON.stringify` output. It decides whether a write is issued at
+   all and whether the delete retry fires, so a host that re-serializes a stored
+   body with a different key order must not read as a change.
+7. **The replica schema is stored state.** RxDB hashes the declared schema and
+   refuses to open a replica whose stored hash differs at the same `version`.
+   The schema ships at `version: 0` with no migration strategy, so a replica
+   created under a different shape is forgotten and re-pulled rather than
+   migrated. Changing the shape is a breaking change for every existing replica
+   and says so in the CHANGELOG.
+8. **The writer id is never an identity.** Unkeyed, clearable, unrecoverable,
+   derived from no secret. The key prefix is required (the package mints no
+   default key two apps could collide on) and the storage is an injected port. A
+   storage that cannot answer mints a fresh id per call and remembers nothing: a
+   module-level fallback would stamp one label into two accounts' histories in
+   the same tab.
+9. **`stop()` is terminal, and every transition is serialized.** The controller
+   core runs start and stop on one FIFO queue, so an overlapping pair cannot
+   interleave and leave a dangling replication, and a `start()` queued behind a
+   `stop()` is refused rather than run against a database the caller is closing.
+   A session that replicates again constructs a fresh controller. What `stop()`
+   guarantees is bounded by RxDB's `cancel()`, which awaits the start and
+   checkpoint queues rather than an in-flight round trip.
+10. **A failed bring-up unwinds without latching.** It cancels every replication
+    it registered, flags every collection `error`, and rethrows, so the caller's
+    bootstrap can surface the failure and the instance stays re-startable.
+    Registration happens before subscription, since the replication auto-starts
+    and a throw in between would leave one `stop()` could not reach.
+11. **A capability-less collection is skipped, not replicated.** In a port whose
+    other entries carry a delegated capability, an entry with none is flagged
+    `error` and skipped: replicating it would draw a fail-closed 403 that reads
+    as a session-wide access failure. A port where no entry carries one invokes
+    the client's own root capability throughout.
+12. **The core reaches for no platform globals.** The timer and the reachability
+    signal are injected ports, so the core runs where there is no DOM and a test
+    drives both. An `isOnline` that cannot answer must return `true`, or a
+    platform with no reachability signal would never poll. `pollMs` is required
+    for the same reason a default would be wrong: two consumers poll at
+    different rates.
+13. **Diagnostics ride the consumer's logging seam.** The controller core, the
+    conflict-handler factory, and the default resolver each take an injected
+    `{ warn, error }` port, defaulting to no-op. The three undecryptable-side
+    warnings are the only signal that a conflict was settled by presuming one
+    side newer rather than by comparing stamps, and a resolver that throws is
+    the handler's own one thing to say (RxDB treats a failed resolution as
+    fatal), so both must reach the app's own logger rather than a bare console.
+    The port's metadata argument is `Record<string, unknown>` rather than
+    `object`, because a parameter type is checked contravariantly and the
+    narrower one would force every consumer to wrap its namespaced logger in
+    adapter closures.
+14. **The root entry never reaches `rxdb`.** Neither at runtime nor in its
+    emitted declarations. A missing package is a resolution failure rather than
+    something a bundler drops, and every consumer compiles with `skipLibCheck`,
+    so a surviving `import type` would degrade to a silent error type. The
+    schema and the conflict handler therefore declare structural types of their
+    own. `test/dist/` walks the built graph and asserts it.
+15. **`./testing` is test-only.** `FakeWasServer` accepts every write and serves
+    a plausible feed, so a production import would show a healthy sync status
+    over a replica writing nothing to WAS. The eslint config keeps `src/` off
+    it, and each consumer keeps the same restriction on its own production
+    globs.
 
 ## Ownership heuristics
 
-Where a given kind of change goes: which module owns which concern,
-and what does not belong in this repo at all (points at the owning
-`@interop/*` package or spec instead). This is the section that stops
-a shared concern from being reimplemented locally.
+- **A WAS request, an error class, or a wire name** belongs to
+  `@interop/was-client` (`./sync` for the port, the vocabulary, and the four
+  `err.name` predicates). This package speaks no WAS HTTP itself.
+- **The last-write-wins comparison** belongs to `@interop/social-core`
+  (`remotePayloadWins`). This package reads the stamp off a payload
+  (`lwwFields`) and applies whichever comparator it is handed.
+- **A conflict policy for a particular collection** belongs to the consuming
+  app, as the injected resolver. A wallet delegates to its own contacts
+  comparator; an app framework compares decrypted stamps through the default.
+- **Key material, ciphers, key epochs, and descriptor-refresh policy** belong to
+  `@interop/was-client/edv` and to each consuming app.
+- **The session gates** (guest, no remote configured, no local replica) belong
+  to each app's binding, ahead of the controller core.
+- **The status store, the i18n, and the platform wiring** belong to each app.
+  The core reports status through a callback and takes the timer and
+  reachability as ports.
+- **The change engine a replica-less wallet drives** belongs to
+  `@interop/wallet-core/sync`. It and this driver are siblings sharing the wire
+  types rather than one algorithm: the engine drives its own store and applies a
+  page transactionally, while RxDB drives this driver's handlers and owns the
+  transaction.
+
+## Parties to the specs
+
+The WAS spec's "Parties to this contract" table names `@interop/was-client` as
+the speaker of the `changes` profile, and this package takes no row of its own:
+every request it makes goes through was-client's sync port, so by the table's
+admission rule ("speaks the WAS HTTP contract directly") it is a downstream
+consumer like the wallets. The walk recorded at the extraction: was-client
+unchanged and still the one named speaker; storage-core, was-teaching-server,
+and was-conformance-suite unaffected (no wire byte changes); everything
+downstream gains this package as one more consumer through was-client, with no
+row text change; and in the encrypted-collections spec the `@interop/was-react`
+row is confirmed rather than rewritten, since the document cipher stays there
+and this package holds none. The package's node and its `rxdb` edge belong to
+the byoe-ecosystem layer map instead.
 
 ## Glossary
 
-The repo's domain vocabulary: one canonical term per concept, used the
-same way in code, tests, docs, commit messages, and conversation. This
-is the bounded context's ubiquitous language in the domain-driven-design
-sense. A repo is one bounded context; when a term carries a different
-meaning in a neighbouring repo, the entry says so and points at that
-repo's glossary.
-
-One bullet per term. Lead with what the term is, in one or two
-sentences; say where it lives if that helps the reader find it; leave
-how it works to the section that describes the mechanism and link
-there. Close the entry with `Avoid:` and the synonyms the repo does not
-use, whenever a plausible synonym exists. That list is what lets a
-reviewer, or an agent, challenge a term that drifts. General programming
-concepts do not belong here; only concepts specific to this repo's
-domain.
-
-- **Example** -- what it is. Where it lives (`src/Example.ts`). Avoid:
-  sample, demo.
+- **Driver** -- this package: the RxDB-side implementation of WAS replication.
+  Contrast the **engine** (`@interop/wallet-core/sync`), the replica-less
+  implementation a mobile wallet drives. Avoid: adapter, sync layer.
+- **Port** -- an injected seam the driver depends on rather than implements: the
+  `WasSyncPort` (WAS access), the storage port (the writer-id mint), the
+  schedule and online source (the controller), and the log port. Avoid:
+  provider, service.
+- **Primary state** -- the server's current state of one resource, as re-read
+  for the 412 conflict path (`PrimaryState`, `withFeedPrimaryRead`). RxDB's own
+  field names on a push row (`assumedMasterState`, `realMasterState`) are RxDB's
+  API and stay as they are. Avoid: master state, remote state.
+- **Wire doc** -- one document as it travels on the `changes` feed (`WireDoc`).
+  Contrast the **synced doc** (`SyncedDoc`), the same document as the local
+  replica stores it. Avoid: change document, row payload.
+- **Conflict entry** -- the primary state the push handler returns for a row the
+  server refused, which is what RxDB's push contract asks for. Avoid: conflict
+  result, rejection.
+- **Ack** -- the server revision an accepted write earned (`PushWriteAck`),
+  written back into the local row so the next conditional write's `If-Match`
+  matches the server. Avoid: receipt, confirmation.
+- **Writer id** -- an unkeyed, clearable attribution label saying which writing
+  agent produced a revision; it attributes history and breaks last-write-wins
+  ties. Avoid: device id, replica id, client id (a client id is keyed and
+  custodied; this is neither).
+- **Key epoch** -- the opaque id of the key a stored envelope was encrypted
+  under, carried verbatim on `SyncedDoc.epoch` and stamped on the content push.
+  The driver never interprets it. Avoid: key version, epoch key.
 
 ## Current State labels
 
-Label structure that is aspirational as Desired Direction and areas
-mid-migration as Transitional, in place, rather than describing the
-intended end state as if it were current. A reader must be able to
-tell what holds today from what is planned.
+Everything above is current. One item is Desired Direction rather than current:
+the `react-native` export condition is carried on all three subpaths, but no
+React Native consumer exists and RxDB's own React Native story is not exercised
+here.

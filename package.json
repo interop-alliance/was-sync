@@ -1,7 +1,7 @@
 {
-  "name": "@interop/isomorphic-lib-template",
-  "description": "A Typescript/Javascript isomorphic library template, for use in the browser, Node.js, and React Native.",
-  "version": "0.0.1",
+  "name": "@interop/was-sync",
+  "description": "The WAS replication driver for RxDB: the changes-feed pull handler, the conditional-write push handler, the conflict-handler seam, the synced-document schema, and the session controller core.",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "build": "pnpm run clear && tsc",
@@ -13,10 +13,11 @@
     "prepare": "pnpm run build",
     "rebuild": "pnpm run clear && pnpm run build",
     "typecheck": "tsc -p tsconfig.dev.json",
-    "test": "pnpm run fix && pnpm run lint && pnpm run typecheck && pnpm run test:node && pnpm run test:browser",
+    "test": "pnpm run fix && pnpm run lint && pnpm run typecheck && pnpm run test:node && pnpm run test:dist && pnpm run test:browser",
     "test:browser": "playwright test",
     "test:node": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:dist": "pnpm run build && vitest run --config vitest.dist.config.ts"
   },
   "files": [
     "dist",
@@ -29,6 +30,18 @@
       "react-native": "./dist/index.js",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./rxdb": {
+      "types": "./dist/rxdb.d.ts",
+      "react-native": "./dist/rxdb.js",
+      "import": "./dist/rxdb.js",
+      "default": "./dist/rxdb.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "react-native": "./dist/testing.js",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
     }
   },
   "module": "dist/index.js",
@@ -36,9 +49,13 @@
   "types": "dist/index.d.ts",
   "sideEffects": false,
   "dependencies": {
+    "@interop/social-core": "^0.8.1",
+    "json-canonicalize": "^3.0.0",
+    "uuidv7": "^1.2.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@interop/was-client": "^0.49.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^26.0.1",
     "@vitest/coverage-v8": "^4.1.7",
@@ -47,6 +64,7 @@
     "globals": "^17.6.0",
     "prettier": "^3.8.3",
     "rimraf": "^6.1.3",
+    "rxdb": "^17.4.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.59.4",
     "vite": "^8.0.14",
@@ -57,7 +75,12 @@
     "provenance": true
   },
   "keywords": [
-    "isomorphic"
+    "isomorphic",
+    "wallet-attached-storage",
+    "replication",
+    "rxdb",
+    "sync",
+    "offline-first"
   ],
   "packageManager": "pnpm@11.5.0",
   "engines": {
@@ -70,8 +93,17 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/interop-alliance/isomorphic-lib-template.git"
+    "url": "git+https://github.com/interop-alliance/was-sync.git"
   },
-  "homepage": "https://github.com/interop-alliance/isomorphic-lib-template",
-  "bugs": "https://github.com/interop-alliance/isomorphic-lib-template/issues"
+  "homepage": "https://github.com/interop-alliance/was-sync",
+  "bugs": "https://github.com/interop-alliance/was-sync/issues",
+  "peerDependencies": {
+    "@interop/was-client": "^0.49.0",
+    "rxdb": "^17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "rxdb": {
+      "optional": true
+    }
+  }
 }

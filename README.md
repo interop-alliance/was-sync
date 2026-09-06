@@ -1,10 +1,12 @@
-# Example Isomorphic TS/JS Lib Template _(@interop/isomorphic-lib-template)_
+# WAS Replication Driver for RxDB _(@interop/was-sync)_
 
-[![Node.js CI](https://github.com/interop-alliance/isomorphic-lib-template/workflows/CI/badge.svg)](https://github.com/interop-alliance/isomorphic-lib-template/actions?query=workflow%3A%22CI%22)
-[![NPM Version](https://img.shields.io/npm/v/@interop/isomorphic-lib-template.svg)](https://npm.im/@interop/isomorphic-lib-template)
+[![Node.js CI](https://github.com/interop-alliance/was-sync/workflows/CI/badge.svg)](https://github.com/interop-alliance/was-sync/actions?query=workflow%3A%22CI%22)
+[![NPM Version](https://img.shields.io/npm/v/@interop/was-sync.svg)](https://npm.im/@interop/was-sync)
 
-> A Typescript/Javascript isomorphic library template, for use in the browser,
-> Node.js, and React Native.
+> The WAS replication driver for RxDB: the changes-feed pull handler, the
+> conditional-write push handler with its conflict assembler, the
+> conflict-handler seam, the synced-document schema, the writer-id mint, and the
+> session controller core. For the browser, Node.js, and React Native.
 
 ## Table of Contents
 
@@ -17,11 +19,70 @@
 
 ## Background
 
-TBD
+A WAS Collection is replicated into a local RxDB replica by pulling the
+`changes` feed and pushing conditional writes back. This library owns that
+driver: mapping the feed's wire documents into replica documents and applying
+the checkpoint rule, routing each local change to the content endpoint, the
+metadata endpoint, or a delete, assembling the conflict entry RxDB asks for when
+a conditional write is refused with `412`, recovering the one benign `412` (a
+delete refused on a drifted revision whose body is unchanged), writing each
+accepted write's acked revision back into the local row, and running one
+replication per collection for a session behind a serialized start and stop.
+
+It was extracted from the two copies that had drifted apart in
+`@interop/was-react` and in the Freewallet browser wallet, neither of which may
+depend on the other. The placement is recorded in
+[decisions/0001](decisions/0001-rxdb-replication-driver-package.md) and the
+current shape in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+What deliberately lives elsewhere: the WAS HTTP client, the sync port, the wire
+vocabulary, the error classes, and the `err.name` predicates that classify them
+(`@interop/was-client`, its `/sync` subpath); the last-write-wins comparison
+rule itself (`@interop/social-core`); document ciphers, key epochs, and every
+other kind of key handling (`@interop/was-client/edv` and each consuming app);
+and the change engine a replica-less wallet drives instead of RxDB
+(`@interop/wallet-core/sync`).
+
+### Three entries
+
+- `@interop/was-sync` -- the types, the synced-document schema, the
+  conflict-handler seam and its last-write-wins default, and the writer-id mint.
+  Free of RxDB in its module graph AND in its emitted declarations, so an app
+  that never builds a replica resolves it with `rxdb` absent.
+- `@interop/was-sync/rxdb` -- the pull and push handlers, the
+  `replicateRxCollection` wiring, the opt-in feed-backed conflict re-read, and
+  the controller core. `rxdb` is this subpath's peer dependency (declared
+  optional, since only this subpath needs it).
+- `@interop/was-sync/testing` -- test fixtures. It loads without `rxdb` too.
+
+`@interop/was-client` is a peer dependency rather than a dependency, so the
+consumer's single range decides which copy resolves. The package constructs none
+of its error classes and matches every one of them by `err.name`.
+
+The `react-native` export condition is carried on all three subpaths, but it is
+forward-looking: there is no React Native consumer of this driver today, and
+RxDB's own React Native story is not exercised here. The writer-id mint takes an
+injected storage port rather than reaching for `localStorage`, which is part of
+what keeps the root entry loadable there.
 
 ## Security
 
-TBD
+The driver moves stored bodies verbatim and holds no key material. `data` is the
+stored content body (plaintext JSON, or an EDV envelope on an encrypted
+collection) and `custom` is the stored metadata body; encrypting and decrypting
+stay above this layer. The one place a decision cannot be body-opaque is a
+mutable-head conflict, whose sides have to be compared: that decision is
+injected as a closure, so no cipher, key, or descriptor reaches this package.
+
+The writer id is an unkeyed, clearable, unrecoverable attribution label, never
+an identity: it derives from no secret, and it can vanish and be re-minted with
+nothing carried over.
+
+Test fixtures ship on the `@interop/was-sync/testing` subpath. They are for
+tests only: `FakeWasServer` accepts every write and serves a plausible `changes`
+feed, so an app that imported it would show a healthy sync status over a replica
+writing nothing to WAS. Keep the subpath out of production import globs (an
+eslint `no-restricted-imports` pattern is what each consumer uses).
 
 ## Install
 
@@ -32,7 +93,13 @@ TBD
 To install via PNPM:
 
 ```
-pnpm install @interop/isomorphic-lib-template
+pnpm install @interop/was-sync
+```
+
+An app that builds a local replica also installs the `rxdb` peer:
+
+```
+pnpm install rxdb
 ```
 
 ### Development
@@ -40,14 +107,63 @@ pnpm install @interop/isomorphic-lib-template
 To install locally (for development):
 
 ```
-git clone https://github.com/interop/isomorphic-lib-template.git
-cd isomorphic-lib-template
+git clone https://github.com/interop-alliance/was-sync.git
+cd was-sync
 pnpm install
 ```
 
 ## Usage
 
-TBD
+The schema and the conflict handler are collection-creation options:
+
+```ts
+import { makeLwwConflictHandler, syncedDocSchema } from '@interop/was-sync'
+
+await database.addCollections({
+  contacts: {
+    schema: syncedDocSchema(),
+    // Mutable-head collections need a rule; a content-addressed collection
+    // takes RxDB's default handler instead.
+    conflictHandler: makeLwwConflictHandler(envelope =>
+      cipher.decrypt(envelope)
+    )
+  }
+})
+```
+
+A whole session's replication runs behind the controller core:
+
+```ts
+import { createSyncController } from '@interop/was-sync/rxdb'
+
+const controller = createSyncController({
+  port: {
+    wasClient,
+    spaceId,
+    serverUrl,
+    collections: [{ key: 'contacts', id: 'contacts' }],
+    rxCollection: key => database.collections[key]
+  },
+  onStatus: (key, collectionId, status) => setStatus(collectionId, status),
+  onlineSource: {
+    isOnline: () => navigator.onLine,
+    subscribe: onOnline => {
+      window.addEventListener('online', onOnline)
+      return () => window.removeEventListener('online', onOnline)
+    }
+  },
+  pollMs: 30_000
+})
+
+await controller.start()
+// ... and on logout. `stop()` is terminal for an instance: a session that
+// replicates again constructs a fresh controller.
+await controller.stop()
+```
+
+`pollMs` is required rather than defaulted, because two consumers poll at
+different rates and a package default would silently change one app's background
+request rate.
 
 ## Contribute
 
