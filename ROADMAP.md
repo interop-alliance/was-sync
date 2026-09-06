@@ -22,30 +22,6 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 
 ---
 
-### WS-1: Delete 404 on the default port wedges the push batch
-
-- status: todo
-- priority: high
-- labels: push, correctness, was-client-port
-- acceptance:
-  - [ ] A not-found error from `deleteContent` is treated as a benign
-        already-gone outcome on both port configurations (default and
-        `mapAuthErrors: true`), matched by `err.name` (invariant 5)
-  - [ ] A push test on the default port shape (plain `NotFoundError`, no
-        `status`) shows the batch completing and the other rows landing
-  - [ ] The hazard note in `src/types.ts` (around line 349) is either removed or
-        turned into a statement of what the driver guarantees
-
-Context: The push handler treats every `deleteContent` rejection as fatal unless
-it matches the conflict or auth predicates. was-client's port only swallows a
-delete 404 when it is built with `mapAuthErrors: true`, and Freewallet builds
-the default port. Deleting a row the server never held (a create whose push
-never landed) or one another replica already deleted throws
-`WasSyncNotFoundError`, the whole `Promise.all` rejects, and RxDB re-sends the
-identical batch on every retry. The collection pins to `error` and every other
-row in that batch never reaches the server. `src/pushWrites.ts:204` is the
-rethrow; `src/types.ts:349-353` documents the hazard without enforcing it.
-
 ### WS-2: Resurrect-after-remote-delete livelocks on the plain port
 
 - status: todo
@@ -117,7 +93,11 @@ contact X; replica B, offline, edits only X's metadata. B reconnects,
 `contentChanged` is false so no content write runs, `PUT /X/meta` 404s against
 the tombstone, the batch rejects, and RxDB retries the same write forever. This
 is exactly the wedge the surrounding comment says the branch exists to prevent,
-on the default port configuration.
+on the default port configuration. WS-1 settled the shared predicate as
+was-client's `isSyncNotFoundError` (`err.name === 'WasSyncNotFoundError'`); note
+the default port's `putMeta` currently raises a plain `NotFoundError` that this
+predicate does not match, so the `/meta` half likely needs was-client to raise
+the sync signal there (an in-house change).
 
 ### WS-5: Benign-412 delete retry can delete an independently re-created resource
 

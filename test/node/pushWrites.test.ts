@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest'
 import {
   WasSyncAuthError,
   WasSyncConflictError,
+  WasSyncNotFoundError,
   formatEtag
 } from '@interop/was-client/sync'
 import { createPushHandler, type PushWriteAck } from '../../src/pushWrites.js'
@@ -46,8 +47,8 @@ type WriteCall =
  * A fake port that records every write VERBATIM (each recorded call spreads the
  * options object it received, so an absent member -- a cleared `custom`, an
  * absent `epoch` -- is genuinely absent from the record and testable with
- * `in`), optionally throws a conflict or a masked-404 auth error for a chosen
- * (kind,id), serves a scripted `get` primary state (or a scripted `get`
+ * `in`), optionally throws a conflict, a not-found signal, or a masked-404 auth
+ * error for a chosen (kind,id), serves a scripted `get` primary state (or a scripted `get`
  * rejection) for the re-read, and acks writes like a versioning server: each
  * accepted content write returns the next content version, each accepted meta
  * write the next metaVersion (starting at 1, like the reference server's
@@ -57,6 +58,7 @@ type WriteCall =
 function fakePushPort(
   options: {
     conflictOn?: { kind: WriteCall['kind']; id: string }
+    notFoundOn?: { kind: WriteCall['kind']; id: string }
     auth404On?: { kind: WriteCall['kind']; id: string }
     primary?: PrimaryState | null
     getRejectsWith?: unknown
@@ -71,6 +73,9 @@ function fakePushPort(
   const maybeReject = (kind: WriteCall['kind'], id: string) => {
     if (options.conflictOn?.kind === kind && options.conflictOn.id === id) {
       throw new WasSyncConflictError()
+    }
+    if (options.notFoundOn?.kind === kind && options.notFoundOn.id === id) {
+      throw new WasSyncNotFoundError()
     }
     if (options.auth404On?.kind === kind && options.auth404On.id === id) {
       throw new WasSyncAuthError(404)
@@ -1079,6 +1084,138 @@ describe('createPushHandler benign delete retry', () => {
 
     expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'r1' }])
     expect(conflicts[0]).toMatchObject({ id: 'r1', version: 2 })
+  })
+})
+
+describe('createPushHandler delete of an absent resource', () => {
+  it('treats a not-found delete as already gone and lets the rest of the batch land', async () => {
+    // The default was-client port raises the not-found signal on a delete
+    // `404` (only `mapAuthErrors: true` swallows it). A spec-conformant server
+    // answers `204` for an authorized delete of an absent resource, so the
+    // `404` is a non-idempotent server or a masked authorization refusal;
+    // neither advances by retrying, and the batch must complete rather than be
+    // re-sent unchanged forever with its other rows never landing.
+    const port = fakePushPort({
+      notFoundOn: { kind: 'deleteContent', id: 'never-pushed' }
+    })
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler(port, async ack => {
+      acks.push(ack)
+    })
+
+    const conflicts = await push([
+      {
+        newDocumentState: newDoc({ id: 'never-pushed', _deleted: true })
+      },
+      { newDocumentState: newDoc({ id: 'sibling', data: { a: 1 } }) }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'never-pushed' },
+      {
+        kind: 'putContent',
+        id: 'sibling',
+        data: { a: 1 },
+        ifNoneMatch: true
+      }
+    ])
+    // No revision is acked for the absent row; the sibling's create is.
+    expect(acks).toEqual([{ id: 'sibling', version: 1 }])
+  })
+
+  it('treats a not-found delete conditional on an assumed revision as already gone', async () => {
+    // Deleted remotely first: the local row still assumes a live primary.
+    const port = fakePushPort({
+      notFoundOn: { kind: 'deleteContent', id: 'r1' }
+    })
+    const push = createPushHandler(port)
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({ version: 3, data: { a: 1 } }),
+        newDocumentState: newDoc({ version: 3, data: { a: 1 }, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: formatEtag(3) }
+    ])
+    expect(port.getCalls).toEqual([])
+  })
+
+  it('treats a not-found on the benign-412 re-issued delete as already gone', async () => {
+    // The stale-revision delete 412s, the re-read shows the same body, and the
+    // resource vanishes between the re-read and the retry (a delete/delete
+    // race). The retry's 404 is the goal state, not an error.
+    const deletes: Array<string | undefined> = []
+    const port: WasSyncPort = {
+      async query() {
+        return { documents: [], checkpoint: null }
+      },
+      async putContent() {
+        return undefined
+      },
+      async deleteContent({ ifMatch }) {
+        deletes.push(ifMatch)
+        if (deletes.length === 1) {
+          throw new WasSyncConflictError()
+        }
+        throw new WasSyncNotFoundError()
+      },
+      async putMeta() {
+        return undefined
+      },
+      async get() {
+        return {
+          version: 5,
+          updatedAt: '2026-02-02T00:00:00Z',
+          data: { a: 1 } as never
+        }
+      }
+    }
+    const push = createPushHandler(port)
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({ version: 1, data: { a: 1 } }),
+        newDocumentState: newDoc({ version: 1, data: { a: 1 }, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(deletes).toEqual([formatEtag(1), formatEtag(5)])
+  })
+
+  it('matches the not-found signal by name alone, with no status', async () => {
+    // A second copy of was-client raises a structurally foreign error; only
+    // `name` is matched (invariant 5), and no `status` is consulted.
+    const port = fakePushPort()
+    port.deleteContent = async deleteOptions => {
+      port.writes.push({ kind: 'deleteContent', ...deleteOptions })
+      throw { name: 'WasSyncNotFoundError', message: 'foreign 404' }
+    }
+    const push = createPushHandler(port)
+
+    const conflicts = await push([
+      { newDocumentState: newDoc({ id: 'gone', _deleted: true }) }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'gone' }])
+  })
+
+  it('still propagates a non-not-found delete error so RxDB retries the batch', async () => {
+    const port = fakePushPort()
+    port.deleteContent = async () => {
+      throw new Error('network down')
+    }
+    const push = createPushHandler(port)
+
+    await expect(
+      push([{ newDocumentState: newDoc({ id: 'r1', _deleted: true }) }])
+    ).rejects.toThrow('network down')
   })
 })
 

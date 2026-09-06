@@ -346,11 +346,12 @@ export interface WasSyncBasePort {
    * Conditionally deletes a resource (writes a tombstone; `DELETE /:id`). Pass
    * `ifMatch` (a quoted ETag over the content `version`) to delete only if
    * unchanged. Returns the tombstone `version` parsed from the response ETag
-   * when the server supplies one (the reference server does not). MUST treat a
-   * `404` as success (resolve `undefined`): the resource is already absent --
-   * a row deleted locally before its first push, or deleted remotely first --
-   * so the tombstone's goal state holds; rejecting would wedge the push batch
-   * in RxDB's retry loop.
+   * when the server supplies one (the reference server does not). A
+   * spec-conformant server answers `204` for an authorized delete of an absent
+   * resource. A `404` may either resolve `undefined` or reject with the
+   * not-found signal (`err.name === 'WasSyncNotFoundError'`); the push handler
+   * reads both as the already-gone outcome, so neither port configuration of
+   * was-client wedges the batch on it.
    *
    * @param options {object}
    * @param options.id {string}

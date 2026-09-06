@@ -79,7 +79,13 @@ numbered so items and reviews can cite them.
    under a drifted revision is re-deleted against the fresh ETag; every other
    412 is a real conflict (`src/pushWrites.ts`). The push-ack write-back only
    makes the case rarer -- it is best-effort and swallows its own failure -- so
-   the retry stays the authority for deletes.
+   the retry stays the authority for deletes. A delete's `404` (was-client's
+   not-found signal, matched by name) is the already-gone outcome on either
+   delete call, not an error: a conformant server answers `204` for an
+   authorized delete of an absent resource, so the `404` is a masked
+   authorization refusal that no retry can advance, and rethrowing it would pin
+   the whole batch in RxDB's retry loop. Revoked access still surfaces on the
+   next feed pull.
 5. **Cross-package errors match by `err.name`, never `instanceof`.** Every error
    this driver classifies is was-client's, raised inside a seam the app injects,
    and that seam can resolve to a second copy of was-client. The predicates come

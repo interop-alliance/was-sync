@@ -308,6 +308,54 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
+  it('completes a batch whose delete targets a resource the server never held (default port)', async () => {
+    // A row deleted locally before its create was ever pushed: the batch
+    // carries a delete with no assumed primary. Per the spec the server answers
+    // `204` for an authorized delete of an absent resource (the teaching server
+    // does), so this pins the spec-conformant path against the real server; the
+    // not-found signal a `404` would raise on the default port is covered by
+    // the push unit suite. Either way the batch completes and the sibling lands.
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const deletes: string[] = []
+    const rawDelete = port.deleteContent.bind(port)
+    port.deleteContent = async options => {
+      deletes.push(options.id)
+      return rawDelete(options)
+    }
+
+    await collection.insert({
+      id: 'cid-never-pushed',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { x: 1 }
+    })
+    await (await collection.findOne('cid-never-pushed').exec())!.remove()
+    await collection.insert({
+      id: 'cid-sibling',
+      updatedAt: '000000000002',
+      version: 0,
+      data: { x: 2 }
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-delete-absent'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    await replication.awaitInSync()
+
+    expect(deletes).toContain('cid-never-pushed')
+    expect(errors).toEqual([])
+    expect(await observer.get({ id: 'cid-never-pushed' })).toBeNull()
+    expect((await observer.get({ id: 'cid-sibling' }))?.data).toEqual({ x: 2 })
+
+    await replication.cancel()
+  })
+
   it('pulls a server-side tombstone as a local delete', async () => {
     const collection = await openCollection()
     const { port, observer } = await openServerCollection()

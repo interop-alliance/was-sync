@@ -54,3 +54,40 @@ run against it in-process. Running the integration suite on the live server
 removes a fixture that would otherwise need to track the spec by hand.
 
 discovered-from: the 2026-09-05 code review that produced WS-1 through WS-10.
+
+### WS-1: Delete 404 on the default port wedges the push batch
+
+- status: done
+- done: 2026-09-05
+- priority: high
+- labels: push, correctness, was-client-port
+- acceptance:
+  - [x] A not-found error from `deleteContent` is treated as a benign
+        already-gone outcome on both port configurations (default and
+        `mapAuthErrors: true`), matched by `err.name` (invariant 5)
+  - [x] A push test on the default port shape (plain `NotFoundError`, no
+        `status`) shows the batch completing and the other rows landing
+  - [x] The hazard note in `src/types.ts` (around line 349) is either removed or
+        turned into a statement of what the driver guarantees
+
+Context: The push handler treats every `deleteContent` rejection as fatal unless
+it matches the conflict or auth predicates. was-client's port only swallows a
+delete 404 when it is built with `mapAuthErrors: true`, and Freewallet builds
+the default port. Deleting a row the server never held (a create whose push
+never landed) or one another replica already deleted throws
+`WasSyncNotFoundError`, the whole `Promise.all` rejects, and RxDB re-sends the
+identical batch on every retry. The collection pins to `error` and every other
+row in that batch never reaches the server. `src/pushWrites.ts:204` is the
+rethrow; `src/types.ts:349-353` documents the hazard without enforcing it.
+
+Outcome: `pushRow` reads was-client's not-found signal (`isSyncNotFoundError`,
+by `err.name`) from either `deleteContent` call (the first delete and the
+benign-412 retry) as the already-gone outcome, so both port configurations
+complete the batch. One correction to the premise above: per the WAS spec an
+authorized DELETE of an absent resource returns `204` (the teaching server
+does), so a delete `404` on a conformant server is the masked authorization
+refusal rather than the never-pushed row. The driver now swallows it on the
+default port the same way was-client already does under `mapAuthErrors`, and
+revoked access still surfaces on the next feed pull. The integration suite pins
+the spec-conformant `204` path; the `404` shape is covered by the push unit
+suite.

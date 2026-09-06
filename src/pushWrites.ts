@@ -30,6 +30,18 @@
  * unchanged is the same content under a drifted revision: the delete is
  * re-issued against the fresh ETag. Every other `412` is a real conflict.
  *
+ * A delete's `404` is read as the already-absent outcome rather than an error.
+ * A spec-conformant server answers `204` for an authorized delete of a resource
+ * it does not hold (a row deleted locally before its create ever landed, or one
+ * another replica deleted first), so a `404` on this path is either a server
+ * that does not treat delete as idempotent or WAS's masked authorization
+ * refusal. Either way the tombstone's goal state cannot be advanced by a retry:
+ * a rethrow would reject the whole batch and RxDB would re-send it unchanged
+ * forever, so no other row in the batch could reach the server. was-client's
+ * port already resolves the `404` itself under `mapAuthErrors`; on the default
+ * port it raises the not-found signal, and this handler reads both the same
+ * way. Revoked access still surfaces on the next feed pull.
+ *
  * RxDB's push contract asks only for *conflicts* back (the current primary state
  * of each rejected row), so a successful write's new `version` / `metaVersion`
  * is reported out-of-band: the response ETag of each accepted write is captured
@@ -44,7 +56,8 @@
 import {
   formatEtag,
   isSyncAuthError,
-  isSyncConflictError
+  isSyncConflictError,
+  isSyncNotFoundError
 } from '@interop/was-client/sync'
 import type {
   PrimaryReadCache,
@@ -187,6 +200,24 @@ async function pushRow({
   // The 412 path: re-read the resource, then report its real primary state.
   const conflictResult = async () => conflictOutcome(await readPrimary())
 
+  // `DELETE /:id` with a `404` read as the already-absent outcome (the
+  // header's delete note): the write is reported as accepted with no acked
+  // revision. The default port raises the not-found signal; a `mapAuthErrors`
+  // port has already resolved `undefined`.
+  const deleteAbsentAsDone = async (options: {
+    id: string
+    ifMatch?: string
+  }): Promise<number | undefined> => {
+    try {
+      return await port.deleteContent(options)
+    } catch (err) {
+      if (isSyncNotFoundError(err)) {
+        return undefined
+      }
+      throw err
+    }
+  }
+
   // Deletes the remote content conditional on the assumed revision, recovering
   // from the one benign `412`: a revision drift with an unchanged body (the
   // header's delete note). A `412` with no assumed revision, an absent primary,
@@ -194,7 +225,7 @@ async function pushRow({
   // path reports it unchanged.
   const deleteWithBenignRetry = async (): Promise<number | undefined> => {
     try {
-      return await port.deleteContent({
+      return await deleteAbsentAsDone({
         id,
         ...(assumedVersion !== undefined && {
           ifMatch: formatEtag(assumedVersion)
@@ -211,7 +242,7 @@ async function pushRow({
       ) {
         throw err
       }
-      return await port.deleteContent({
+      return await deleteAbsentAsDone({
         id,
         ifMatch: formatEtag(primary.version)
       })

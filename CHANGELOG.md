@@ -13,6 +13,13 @@
 
 ### Fixed
 
+- A delete's `404` no longer wedges the push batch on the default was-client
+  port. The push handler reads the not-found signal from `deleteContent` (by
+  `err.name`) as the already-gone outcome, matching what a `mapAuthErrors: true`
+  port already resolves itself, so the batch completes and its other rows land
+  (WS-1). A spec-conformant server answers `204` for an authorized delete of an
+  absent resource; the `404` on that path is a masked authorization refusal,
+  which still surfaces on the next feed pull.
 - The packaging suite (formerly `test:dist`) is now `test:packaging` and lives
   in `test/packaging/`. The old `test/dist/` directory matched the unanchored
   `dist` line in `.gitignore`, so the suite was never committed and CI failed
