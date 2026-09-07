@@ -425,6 +425,9 @@ describe('createPushHandler conflicts', () => {
   })
 
   it('synthesizes a tombstone conflict when the resource is now absent', async () => {
+    // The entry carries no etag and `version: 0`: the plain port's null
+    // re-read says only that no live resource is there, and no local revision
+    // stands in for the server's.
     const port = fakePushPort({
       conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary: null
@@ -433,7 +436,11 @@ describe('createPushHandler conflicts', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 4, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 4,
+          etag: etagFor(4),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 4, _deleted: true })
       }
     ])
@@ -442,7 +449,7 @@ describe('createPushHandler conflicts', () => {
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 4,
+        version: 0,
         _deleted: true
       }
     ])
@@ -746,6 +753,86 @@ describe('createPushHandler write acks', () => {
   })
 })
 
+describe('createPushHandler tombstoned assumed primary', () => {
+  // A server treats a tombstone as absent for preconditions: `If-Match`
+  // against it is refused whatever validator is sent, `If-None-Match: *`
+  // re-creates it. So once RxDB has adopted a tombstone conflict entry (or a
+  // feed tombstone) as the assumed primary, the next content write is a create
+  // and the next delete is unconditional -- the resurrect-after-remote-delete
+  // case converges in one cycle instead of re-issuing `If-Match`.
+  it('re-creates with If-None-Match when the assumed primary is a tombstone', async () => {
+    const port = fakePushPort()
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler(port, async ack => {
+      acks.push(ack)
+    })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 2,
+          etag: etagFor(2),
+          _deleted: true
+        }),
+        newDocumentState: newDoc({
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 2 }
+        })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([
+      { kind: 'putContent', id: 'r1', data: { a: 2 }, ifNoneMatch: true }
+    ])
+    expect(port.getCalls).toEqual([])
+    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+  })
+
+  it('re-creates a tombstone conflict entry that carries no etag', async () => {
+    // The entry the plain port's null re-read produces: `version: 0`, no etag.
+    const port = fakePushPort()
+    const push = createPushHandler(port)
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({ version: 0, _deleted: true }),
+        newDocumentState: newDoc({
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 2 }
+        })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([
+      { kind: 'putContent', id: 'r1', data: { a: 2 }, ifNoneMatch: true }
+    ])
+  })
+
+  it('deletes unconditionally when the assumed primary is a tombstone', async () => {
+    const port = fakePushPort()
+    const push = createPushHandler(port)
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 2,
+          etag: etagFor(2),
+          _deleted: true
+        }),
+        newDocumentState: newDoc({ version: 2, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'r1' }])
+    expect(port.getCalls).toEqual([])
+  })
+})
+
 describe('createPushHandler metadata 404 corroboration', () => {
   it('resolves as a conflict tombstone when the primary is gone', async () => {
     // Under WAS 404-masking a /meta 404 is ambiguous. An independent re-read
@@ -777,7 +864,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 1,
+        version: 0,
         _deleted: true
       }
     ])
@@ -1394,7 +1481,7 @@ describe('createPushHandler typed signals from another copy', () => {
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 1,
+        version: 0,
         _deleted: true
       }
     ])

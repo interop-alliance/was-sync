@@ -1,6 +1,6 @@
 # WAS Sync Roadmap (open items)
 
-nextAvailableId: 13
+nextAvailableId: 14
 
 Status as of 2026-09-05. Uses the formalized item structure shared across the
 `@interop/*` repos.
@@ -21,32 +21,6 @@ blocked externally or a parking record); `done` items move to
 in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 
 ---
-
-### WS-2: Resurrect-after-remote-delete livelocks on the plain port
-
-- status: todo
-- priority: high
-- labels: push, conflict, correctness
-- acceptance:
-  - [ ] On the plain was-client port, a 412 followed by a null re-read is
-        classified (tombstone vs absence) before a conflict entry is built, and
-        a tombstoned assumed master takes the create path rather than `If-Match`
-  - [ ] A push test passes an `assumedMasterState` with `_deleted: true` and
-        asserts the write converges in one cycle instead of re-issuing
-        `If-Match` with a fabricated version
-  - [ ] `primaryOrTombstone` no longer fabricates the conflict entry's version
-        from local state
-
-Context: When a conditional write 412s, the push path re-reads the primary. On
-the plain port (no `withFeedPrimaryRead`) a tombstone and an absence both
-resolve to null, and `primaryOrTombstone` (`src/pushWrites.ts:97`) fills in a
-conflict entry using the local version. Replica B deletes X (server version 2).
-Replica A, at assumed version 1, edits X: 412, null re-read, fabricated entry
-`{version: 1, _deleted: true}`, the resolver picks local, RxDB stores that
-fabricated entry as assumed master and re-pushes with `If-Match "1"` (line 246)
-rather than a create. Each conflict write bumps the fork revision and retriggers
-upstream, so this is a hot loop rather than a per-poll retry. Freewallet runs
-this port.
 
 ### WS-3: Delete with no assumed primary is sent unconditionally
 
@@ -312,3 +286,38 @@ once; and nothing pins it against drift. The prefix `sync` joins the namespace
 list in the logging package's README (`fw`, `wc`, `wr`, `dcw`). One seam
 replaces two, per the greenfield stance; consumers lose an option from each
 builder.
+
+### WS-13: Pin the resurrection path's `/meta` write against the live server
+
+- status: todo
+- priority: medium
+- labels: push, metadata, tombstones, integration-test
+- touches:
+  - was-sync: `test/node/replication.integration.test.ts`
+  - was-teaching-server: WAS-89 (the metadata validator across a soft
+    delete); the case below is the client-side check that its fix holds
+  - wallet-attached-storage-spec: WASS-28 (the lifecycle rule the case
+    asserts)
+- acceptance:
+  - [ ] An integration case resurrects a tombstoned row that carries `custom`
+        and asserts both halves land in one push cycle: the content write
+        under `If-None-Match: *`, then the `/meta` write under
+        `If-None-Match: *`, with no 412 and no conflict-handler invocation
+  - [ ] The same case asserts that a `/meta` `If-Match` carrying the
+        pre-delete metadata `ETag` is refused with 412 after the re-create,
+        so a stale replica cannot clobber the resurrected row's `custom`
+  - [ ] ARCHITECTURE.md's push-handler notes record that the `/meta` half of a
+        resurrection is a create-if-absent, and that a server keeping the
+        metadata object through a tombstone would cost one extra cycle (a
+        412, a re-read, a conflict resolution) rather than fail
+
+The current resurrection integration test covers the content half only. The
+push handler compares the new local `custom` against the assumed primary's,
+and a tombstone entry has none, so the `/meta` write goes out as a
+create-if-absent. Against the teaching server that is exactly right, because
+its tombstone drops `custom` and `metaVersion`. It also depends on the server
+not reusing the pre-delete metadata validator after the re-create, which the
+server currently does (WAS-89): the meta `ETag` is `<generation>.<metaVersion>`
+with the generation kept through the tombstone and `metaVersion` restarting at
+1. The second acceptance point is what catches that class of defect from the
+driver's side.

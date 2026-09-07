@@ -87,7 +87,20 @@ numbered so items and reviews can cite them.
    authorized delete of an absent resource, so the `404` is a masked
    authorization refusal that no retry can advance, and rethrowing it would pin
    the whole batch in RxDB's retry loop. Revoked access still surfaces on the
-   next feed pull.
+   next feed pull. A tombstone is absent for preconditions: a `412` whose
+   re-read resolves `null` builds a tombstone conflict entry with `version: 0`
+   and no `etag` (the plain port cannot tell a tombstone from a resource that
+   never existed, and both take the same next write), and an assumed primary
+   with `_deleted: true` routes a content write to `If-None-Match: *` and a
+   delete to an unconditional `DELETE`, since `If-Match` against a tombstone is
+   refused whatever validator it carries. That refusal is RFC 9110's rule, not a
+   server quirk: a tombstone has no current representation (which is why `GET`
+   answers `404`), and against no representation `If-None-Match: *` is true and
+   `If-Match` with any tag is false. Honoring the tombstone's surviving ETag was
+   considered and rejected on 2026-09-07: it would put WAS at odds with the HTTP
+   semantics the spec borrows, for a gain confined to one race (a third replica
+   re-creating and re-deleting in between), which the changes feed already
+   surfaces as higher-version entries for the next pull to reconcile.
 5. **Cross-package errors match by `err.name`, never `instanceof`.** Every error
    this driver classifies is was-client's, raised inside a seam the app injects,
    and that seam can resolve to a second copy of was-client. The predicates come
@@ -230,8 +243,7 @@ the byoe-ecosystem layer map instead.
   result, rejection.
 - **Ack** -- the server revision and opaque `ETag` an accepted write earned
   (`PushWriteAck`), written back into the local row so the next conditional
-  write's `If-Match` echoes what the server holds. Avoid: receipt,
-  confirmation.
+  write's `If-Match` echoes what the server holds. Avoid: receipt, confirmation.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a revision; it attributes history and breaks last-write-wins
   ties. Avoid: device id, replica id, client id (a client id is keyed and

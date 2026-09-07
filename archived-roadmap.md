@@ -91,3 +91,46 @@ default port the same way was-client already does under `mapAuthErrors`, and
 revoked access still surfaces on the next feed pull. The integration suite pins
 the spec-conformant `204` path; the `404` shape is covered by the push unit
 suite.
+
+### WS-2: Resurrect-after-remote-delete livelocks on the plain port
+
+- status: done (2026-09-07)
+- priority: high
+- labels: push, conflict, correctness
+- acceptance:
+  - [x] On the plain was-client port, a 412 followed by a null re-read builds a
+        tombstone conflict entry (a tombstone and an absence take the same next
+        write, so the entry does not tell them apart), and a tombstoned assumed
+        primary takes the create path rather than `If-Match`
+  - [x] A push test passes an `assumedMasterState` with `_deleted: true` and
+        asserts the write converges in one cycle instead of re-issuing
+        `If-Match` with a fabricated version
+  - [x] `primaryOrTombstone` no longer fabricates the conflict entry's version
+        from local state
+
+Context: When a conditional write 412s, the push path re-reads the primary. On
+the plain port (no `withFeedPrimaryRead`) a tombstone and an absence both
+resolve to null, and `primaryOrTombstone` (`src/pushWrites.ts:97`) fills in a
+conflict entry using the local version. Replica B deletes X (server version 2).
+Replica A, at assumed version 1, edits X: 412, null re-read, fabricated entry
+`{version: 1, _deleted: true}`, the resolver picks local, RxDB stores that
+fabricated entry as assumed master and re-pushes with `If-Match "1"` (line 246)
+rather than a create. Each conflict write bumps the fork revision and retriggers
+upstream, so this is a hot loop rather than a per-poll retry. Freewallet runs
+this port.
+
+Outcome: The picture shifted under the item before it was implemented. Once
+`If-Match` became the opaque `etag` echoed verbatim, a fabricated `version`
+could no longer feed a precondition, and the re-push after the conflict sent an
+unconditional `PUT` instead of looping: it converged, but could overwrite a
+concurrent re-create. The fix is the same either way. A null re-read now builds
+`{ version: 0, _deleted: true }` with no `etag` (zero being the value a fresh
+local row already carries for "no server revision known"), and an assumed
+primary with `_deleted: true` routes a content write to `If-None-Match: *` and a
+delete to an unconditional `DELETE`. Classification on the plain port is neither
+possible (a tombstone `GET` is a `404`, and the server never sends `410`) nor
+needed: the server treats a tombstone as absent for preconditions, so
+create-if-absent is the one path that resurrects it and `If-Match` against a
+tombstone is refused whatever validator is sent, the surviving generation ETag
+included. The integration suite drives the scenario against the live server on
+the plain port and asserts one refused update followed by exactly one create.

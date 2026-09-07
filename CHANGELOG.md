@@ -9,9 +9,21 @@
   matching was-client's opaque `ETag` contract. `MasterState` / `WireDoc` /
   `SyncedDoc` gain `etag` / `metaEtag`, and a conditional write's `ifMatch` is
   now the validator echoed back verbatim -- it can no longer be rebuilt from a
-  version number. The replica schema's shape changed to carry the new fields,
-  so an existing replica is forgotten and re-pulled at the next login (schema
+  version number. The replica schema's shape changed to carry the new fields, so
+  an existing replica is forgotten and re-pulled at the next login (schema
   `version` stays `0`).
+
+### Fixed
+
+- Resurrecting a resource another replica deleted converges in one cycle on the
+  plain was-client port (WS-2). A `412` whose re-read resolves `null` now builds
+  a tombstone conflict entry with `version: 0` and no `etag` instead of a
+  version copied from local state, and an assumed primary that is a tombstone
+  routes the next content write to `If-None-Match: *` (the one precondition a
+  server accepts against a tombstone) and a delete to an unconditional `DELETE`.
+  Before the opaque-ETag change the re-push sent `If-Match` with the fabricated
+  version and looped hot; after it, an unconditional `PUT` that could overwrite
+  a concurrent re-create.
 
 ## 0.1.2 - 2026-09-07
 

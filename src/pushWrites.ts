@@ -31,6 +31,21 @@
  * unchanged is the same content under a drifted revision: the delete is
  * re-issued against the fresh ETag. Every other `412` is a real conflict.
  *
+ * A `412` whose re-read resolves `null` is reported as a tombstone conflict
+ * entry with no `etag` and `version: 0`, the value a fresh local row carries
+ * for "no server revision known". The plain was-client port resolves `null` for
+ * a tombstone and for a resource that never existed alike (a `GET` on either
+ * is a `404`), and the two cases take the same next write, so the entry does
+ * not tell them apart. A server treats a tombstone as absent for preconditions:
+ * `If-None-Match: *` re-creates it while `If-Match` against it is refused
+ * whatever validator is sent. So an assumed primary that is a tombstone (that
+ * conflict entry once RxDB has adopted it, or a tombstone pulled off the feed)
+ * routes a content write to the create path and a delete to an unconditional
+ * `DELETE`, which a conformant server answers `204` for. Without that routing
+ * the re-push after a resurrect-vs-remote-delete conflict either sent
+ * `If-Match` with a fabricated revision and looped, or sent an unconditional
+ * `PUT` that could overwrite a concurrent re-create.
+ *
  * A delete's `404` is read as the already-absent outcome rather than an error.
  * A spec-conformant server answers `204` for an authorized delete of a resource
  * it does not hold (a row deleted locally before its create ever landed, or one
@@ -89,36 +104,35 @@ export interface PushWriteAck {
 
 /**
  * Maps a re-read primary state into the RxDB conflict entry for one row, or --
- * when the re-read found the resource genuinely absent (`primary === null`, a
- * delete/delete race) -- synthesizes the tombstone conflict entry from what we
- * know locally. Shared by the `412` assembler and the `/meta` 404 recovery, so
- * both report an absent primary identically. The primary's `deleted` flag is
- * optional (only a feed-backed read sets it) and an absent one reads as
- * `false`.
+ * when the re-read resolved `null` (a tombstone, or a resource that never
+ * existed; the plain port reports both that way) -- the tombstone conflict
+ * entry. That entry carries no `etag` and `version: 0`, since the server's
+ * revision is unknown and nothing local stands in for it; the local `updatedAt`
+ * fills the required sort field. Shared by the `412` assembler and the `/meta`
+ * 404 recovery, so both report an absent primary identically. The primary's
+ * `deleted` flag is optional (only a feed-backed read sets it) and an absent
+ * one reads as `false`.
  *
  * @param options {object}
  * @param options.id {string}
  * @param options.primary {PrimaryState | null}
  * @param options.fallbackUpdatedAt {string}   used if the resource is now absent
- * @param options.fallbackVersion {number}     used if the resource is now absent
  * @returns {WithDeleted<SyncedDoc>}
  */
 function primaryOrTombstone({
   id,
   primary,
-  fallbackUpdatedAt,
-  fallbackVersion
+  fallbackUpdatedAt
 }: {
   id: string
   primary: PrimaryState | null
   fallbackUpdatedAt: string
-  fallbackVersion: number
 }): WithDeleted<SyncedDoc> {
   if (primary === null) {
     return {
       id,
       updatedAt: fallbackUpdatedAt,
-      version: fallbackVersion,
+      version: 0,
       _deleted: true
     }
   }
@@ -171,12 +185,15 @@ async function pushRow({
   const assumedEtag = assumedMasterState?.etag
   const assumedMetaVersion = assumedMasterState?.metaVersion
   const assumedMetaEtag = assumedMasterState?.metaEtag
-  const isCreate = assumedMasterState === undefined
+  // An assumed primary that is a tombstone holds no live resource to condition
+  // on (the header's tombstone note): a content write is a create and a delete
+  // goes unconditional, whatever validator the tombstone carries.
+  const assumedIsTombstone = assumedMasterState?._deleted === true
+  const isCreate = assumedMasterState === undefined || assumedIsTombstone
+  const deleteEtag = assumedIsTombstone ? undefined : assumedEtag
   const ack: PushWriteAck = { id }
   const hasAck = () =>
     ack.version !== undefined || ack.metaVersion !== undefined
-  const fallbackVersion = () =>
-    ack.version ?? assumedVersion ?? newDocumentState.version
 
   // Re-reads this row's primary. A row that has ALREADY written this batch
   // (a content write accepted before a `/meta` rejection) bypasses the batch
@@ -192,17 +209,16 @@ async function pushRow({
       ? port.get({ id })
       : port.get({ id, ...(cache !== undefined && { cache }) })
 
-  // Builds the conflict outcome from a re-read primary (or from its absence, a
-  // delete/delete race), PRESERVING any ack already earned: a content write
-  // accepted before a `/meta` 412 must keep its acked `version` (and feed it to
-  // the absent-primary fallback), or the local row keeps the pre-write version
-  // and every later conditional write sends a stale `If-Match`.
+  // Builds the conflict outcome from a re-read primary (or from its absence),
+  // PRESERVING any ack already earned: a content write accepted before a
+  // `/meta` 412 must keep its acked `version` / `etag`, or the local row keeps
+  // the pre-write state and every later conditional write sends a stale
+  // `If-Match`.
   const conflictOutcome = (primary: PrimaryState | null) => ({
     conflict: primaryOrTombstone({
       id,
       primary,
-      fallbackUpdatedAt: newDocumentState.updatedAt,
-      fallbackVersion: fallbackVersion()
+      fallbackUpdatedAt: newDocumentState.updatedAt
     }),
     ack: hasAck() ? ack : null
   })
@@ -237,19 +253,19 @@ async function pushRow({
     }
   }
 
-  // Deletes the remote content conditional on the assumed etag, recovering
-  // from the one benign `412`: a revision drift with an unchanged body (the
-  // header's delete note). A `412` with no assumed etag, an absent primary,
-  // or a primary whose body really differs is rethrown, so the caller's conflict
-  // path reports it unchanged.
+  // Deletes the remote content conditional on the assumed etag (none when the
+  // assumed primary is a tombstone), recovering from the one benign `412`: a
+  // revision drift with an unchanged body (the header's delete note). A `412`
+  // with no assumed etag, an absent primary, or a primary whose body really
+  // differs is rethrown, so the caller's conflict path reports it unchanged.
   const deleteWithBenignRetry = async (): Promise<WriteAck | undefined> => {
     try {
       return await deleteAbsentAsDone({
         id,
-        ...(assumedEtag !== undefined && { ifMatch: assumedEtag })
+        ...(deleteEtag !== undefined && { ifMatch: deleteEtag })
       })
     } catch (err) {
-      if (!isSyncConflictError(err) || assumedEtag === undefined) {
+      if (!isSyncConflictError(err) || deleteEtag === undefined) {
         throw err
       }
       const primary = await readPrimary()

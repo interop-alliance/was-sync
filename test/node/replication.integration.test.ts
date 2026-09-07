@@ -359,7 +359,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
   it('pulls a server-side tombstone as a local delete', async () => {
     const collection = await openCollection()
     const { port, observer } = await openServerCollection()
-    const version = await observer.putContent({
+    const created = await observer.putContent({
       id: 'cid-gone',
       data: { from: 'server' }
     })
@@ -373,7 +373,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     expect(await collection.findOne('cid-gone').exec()).not.toBeNull()
 
     // The other writer deletes it; the tombstone rides the feed down.
-    await observer.deleteContent({ id: 'cid-gone', ifMatch: `"${version}"` })
+    await observer.deleteContent({ id: 'cid-gone', ifMatch: created.etag })
     await eventually(
       async () => (await collection.findOne('cid-gone').exec()) === null,
       () => replication.reSync()
@@ -473,7 +473,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     const collection = await openCollection({ lww: true })
     const { port, observer } = await openServerCollection()
     // The LWW payload (`updatedAt`, `writerId`) travels inside `data`.
-    const version = await observer.putContent({
+    const created = await observer.putContent({
       id: 'cid-race',
       data: {
         step: 'server-1',
@@ -500,7 +500,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
         updatedAt: '2026-01-01T00:00:02Z',
         writerId: 'b'
       },
-      ifMatch: `"${version}"`
+      ifMatch: created.etag
     })
     await pulled!.incrementalPatch({
       data: {
@@ -525,6 +525,81 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       },
       () => replication.reSync()
     )
+
+    await replication.cancel()
+  })
+
+  it('resurrects a resource another replica deleted, on the plain port, in one cycle', async () => {
+    // Replica B deletes X behind this replica's back; this replica edits X.
+    // The push 412s, the plain port's re-read is null (a tombstone GET is a
+    // 404), the conflict entry is a tombstone, and the local edit wins. The
+    // re-push must then be a create (`If-None-Match: *`), which the server
+    // accepts against a tombstone, rather than an `If-Match` it always refuses
+    // or an unconditional overwrite.
+    const collection = await openCollection({ lww: true })
+    const { port, observer } = await openServerCollection()
+    const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      const { ifMatch, ifNoneMatch } = options
+      contentWrites.push({
+        ...(ifMatch !== undefined && { ifMatch }),
+        ...(ifNoneMatch !== undefined && { ifNoneMatch })
+      })
+      return rawPut(options)
+    }
+    const created = await observer.putContent({
+      id: 'cid-resurrect',
+      data: {
+        step: 'server-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-resurrect'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-resurrect').exec()
+    expect(stepOf(pulled?.toJSON().data)).toBe('server-1')
+
+    await observer.deleteContent({ id: 'cid-resurrect', ifMatch: created.etag })
+    expect(await observer.get({ id: 'cid-resurrect' })).toBeNull()
+    await pulled!.incrementalPatch({
+      data: {
+        step: 'local-2',
+        updatedAt: '2026-01-01T00:00:03Z',
+        writerId: 'a'
+      },
+      updatedAt: '000000000003'
+    })
+
+    await eventually(
+      async () =>
+        stepOf((await observer.get({ id: 'cid-resurrect' }))?.data) ===
+        'local-2',
+      () => replication.reSync()
+    )
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-resurrect').exec()
+        const primary = await observer.get({ id: 'cid-resurrect' })
+        return current?.toJSON().etag === primary?.etag
+      },
+      () => replication.reSync()
+    )
+
+    // One refused update, then exactly one create; no `If-Match` re-issue.
+    expect(contentWrites).toEqual([
+      { ifMatch: created.etag },
+      { ifNoneMatch: true }
+    ])
+    expect(errors).toEqual([])
 
     await replication.cancel()
   })
