@@ -12,8 +12,7 @@ import { captureLogger } from '@interop/logger'
 import {
   WasSyncAuthError,
   WasSyncConflictError,
-  WasSyncNotFoundError,
-  formatEtag
+  WasSyncNotFoundError
 } from '@interop/was-client/sync'
 import { createPushHandler, type PushWriteAck } from '../../src/pushWrites.js'
 import { withFeedPrimaryRead } from '../../src/feedPrimaryPort.js'
@@ -24,8 +23,22 @@ import type {
   WasSyncBasePort,
   WasSyncPort,
   WireDoc,
-  WithDeleted
+  WithDeleted,
+  WriteAck
 } from '../../src/types.js'
+
+/**
+ * A deterministic, opaque-looking test etag for a given revision number. The
+ * real server's `ETag` cannot be rebuilt from a revision number (it is
+ * opaque), so every fixture that wants a conditional write to fire must set
+ * this explicitly on the fixture rather than have it derived.
+ *
+ * @param version {number}
+ * @returns {string}
+ */
+function etagFor(version: number): string {
+  return `"etag-${version}"`
+}
 
 type WriteCall =
   | {
@@ -52,10 +65,11 @@ type WriteCall =
  * `in`), optionally throws a conflict, a not-found signal, or a masked-404 auth
  * error for a chosen (kind,id), serves a scripted `get` primary state (or a scripted `get`
  * rejection) for the re-read, and acks writes like a versioning server: each
- * accepted content write returns the next content version, each accepted meta
- * write the next metaVersion (starting at 1, like the reference server's
- * create). `ackWrites: false` models a server that exposes no ETag on write
- * responses (e.g. cross-origin without `Access-Control-Expose-Headers`).
+ * accepted content write returns the next content version + its etag (via
+ * {@link etagFor}), each accepted meta write the next metaVersion + its etag
+ * (starting at 1, like the reference server's create). `ackWrites: false`
+ * models a server that exposes no ETag on write responses (e.g. cross-origin
+ * without `Access-Control-Expose-Headers`).
  */
 function fakePushPort(
   options: {
@@ -83,10 +97,15 @@ function fakePushPort(
       throw new WasSyncAuthError(404)
     }
   }
-  const bump = (revisions: Map<string, number>, id: string) => {
+  // A real write always acks at least the new version (the server's
+  // fallback re-read finds it even with no ETag header); `ackWrites: false`
+  // withholds only the etag, modeling a backend that exposes no `ETag`.
+  const bump = (revisions: Map<string, number>, id: string): WriteAck => {
     const next = (revisions.get(id) ?? 0) + 1
     revisions.set(id, next)
-    return ackWrites ? next : undefined
+    return ackWrites
+      ? { version: next, etag: etagFor(next) }
+      : { version: next }
   }
   return {
     writes,
@@ -169,23 +188,27 @@ describe('createPushHandler routing', () => {
     })
   })
 
-  it('updates content with If-Match "<version>" when the body changed', async () => {
+  it('updates content with If-Match echoing the assumed etag when the body changed', async () => {
     const port = fakePushPort()
     const push = createPushHandler(port)
 
     await push([
       {
-        assumedMasterState: newDoc({ version: 5, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 5,
+          etag: etagFor(5),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 5, data: { a: 2 } })
       }
     ])
 
     expect(port.writes).toEqual([
-      { kind: 'putContent', id: 'r1', data: { a: 2 }, ifMatch: formatEtag(5) }
+      { kind: 'putContent', id: 'r1', data: { a: 2 }, ifMatch: etagFor(5) }
     ])
   })
 
-  it('routes a metadata-only change to /meta with If-Match "<metaVersion>", no content write', async () => {
+  it('routes a metadata-only change to /meta with If-Match echoing the assumed metaEtag, no content write', async () => {
     const port = fakePushPort()
     const push = createPushHandler(port)
 
@@ -194,6 +217,7 @@ describe('createPushHandler routing', () => {
         assumedMasterState: newDoc({
           version: 5,
           metaVersion: 2,
+          metaEtag: etagFor(2),
           data: { a: 1 },
           custom: { jwe: 'old' }
         }),
@@ -211,7 +235,7 @@ describe('createPushHandler routing', () => {
         kind: 'putMeta',
         id: 'r1',
         custom: { jwe: 'new' },
-        ifMatch: formatEtag(2)
+        ifMatch: etagFor(2)
       }
     ])
   })
@@ -222,7 +246,11 @@ describe('createPushHandler routing', () => {
 
     await push([
       {
-        assumedMasterState: newDoc({ version: 5, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 5,
+          etag: etagFor(5),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({
           version: 5,
           data: { a: 1 },
@@ -262,13 +290,17 @@ describe('createPushHandler routing', () => {
     expect(port.writes).toEqual([])
   })
 
-  it('deletes with If-Match "<version>" and skips any metadata write', async () => {
+  it('deletes with If-Match echoing the assumed etag and skips any metadata write', async () => {
     const port = fakePushPort()
     const push = createPushHandler(port)
 
     await push([
       {
-        assumedMasterState: newDoc({ version: 7, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 7,
+          etag: etagFor(7),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({
           version: 7,
           _deleted: true,
@@ -278,7 +310,7 @@ describe('createPushHandler routing', () => {
     ])
 
     expect(port.writes).toEqual([
-      { kind: 'deleteContent', id: 'r1', ifMatch: formatEtag(7) }
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(7) }
     ])
   })
 
@@ -295,6 +327,7 @@ describe('createPushHandler routing', () => {
         assumedMasterState: newDoc({
           version: 5,
           metaVersion: 2,
+          metaEtag: etagFor(2),
           data: { a: 1 },
           custom: { jwe: 'old' }
         }),
@@ -308,7 +341,7 @@ describe('createPushHandler routing', () => {
 
     expect(conflicts).toEqual([])
     expect(port.writes).toEqual([
-      { kind: 'putMeta', id: 'r1', ifMatch: formatEtag(2) }
+      { kind: 'putMeta', id: 'r1', ifMatch: etagFor(2) }
     ])
     expect('custom' in port.writes[0]!).toBe(false)
   })
@@ -340,7 +373,11 @@ describe('createPushHandler routing', () => {
 
     await push([
       {
-        assumedMasterState: newDoc({ version: 5, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 5,
+          etag: etagFor(5),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 5, data: { a: 2 }, epoch: 'e2' })
       }
     ])
@@ -351,7 +388,7 @@ describe('createPushHandler routing', () => {
         id: 'r1',
         data: { a: 2 },
         epoch: 'e2',
-        ifMatch: formatEtag(5)
+        ifMatch: etagFor(5)
       }
     ])
   })
@@ -553,25 +590,30 @@ describe('createPushHandler write acks', () => {
     ])
 
     expect(conflicts).toEqual([])
-    expect(acks).toEqual([{ id: 'r1', version: 1 }])
+    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
   })
 
-  it('uses the acked version on the next update push (no 412 in steady state)', async () => {
+  it('uses the acked etag on the next update push (no 412 in steady state)', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
     const push = createPushHandler(port, async ack => {
       acks.push(ack)
     })
 
-    // Create: server acks version 1; the caller writes it back into the row,
-    // so the next push's assumed primary carries version 1.
+    // Create: server acks version 1 + its etag; the caller writes it back
+    // into the row, so the next push's assumed primary carries that etag.
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
-    expect(acks).toEqual([{ id: 'r1', version: 1 }])
+    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
 
-    // Steady-state update: If-Match uses the acked version, no conflict.
+    // Steady-state update: If-Match echoes the acked etag, no conflict.
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ id: 'r1', version: 1, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          id: 'r1',
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ id: 'r1', version: 1, data: { a: 2 } })
       }
     ])
@@ -581,9 +623,9 @@ describe('createPushHandler write acks', () => {
       kind: 'putContent',
       id: 'r1',
       data: { a: 2 },
-      ifMatch: formatEtag(1)
+      ifMatch: etagFor(1)
     })
-    expect(acks[1]).toEqual({ id: 'r1', version: 2 })
+    expect(acks[1]).toEqual({ id: 'r1', version: 2, etag: etagFor(2) })
   })
 
   it('reports the acked metaVersion on a metadata write', async () => {
@@ -604,7 +646,7 @@ describe('createPushHandler write acks', () => {
       }
     ])
 
-    expect(acks).toEqual([{ id: 'r1', metaVersion: 1 }])
+    expect(acks).toEqual([{ id: 'r1', metaVersion: 1, metaEtag: etagFor(1) }])
   })
 
   it('does not report an ack for a delete whose response carries no ETag', async () => {
@@ -625,7 +667,10 @@ describe('createPushHandler write acks', () => {
     expect(acks).toEqual([])
   })
 
-  it('does not report an ack when the server exposes no write ETags', async () => {
+  it('reports the acked version with no etag when the server exposes no write ETags', async () => {
+    // A backend with no `ETag` on write responses still acks a version (the
+    // server's fallback re-read finds it), just with no validator to echo
+    // back later -- the next update push against this row sends no `If-Match`.
     const port = fakePushPort({ ackWrites: false })
     const acks: PushWriteAck[] = []
     const push = createPushHandler(port, async ack => {
@@ -634,7 +679,7 @@ describe('createPushHandler write acks', () => {
 
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
 
-    expect(acks).toEqual([])
+    expect(acks).toEqual([{ id: 'r1', version: 1 }])
   })
 
   it('does not report an ack for a rejected write', async () => {
@@ -697,7 +742,7 @@ describe('createPushHandler write acks', () => {
       'putMeta'
     ])
     expect(conflicts).toHaveLength(1)
-    expect(acks).toEqual([{ id: 'r1', version: 1 }])
+    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
   })
 })
 
@@ -736,7 +781,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
         _deleted: true
       }
     ])
-    expect(acks).toEqual([{ id: 'r1', version: 1 }])
+    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
   })
 
   it('resolves as a conflict when the re-read primary is already a tombstone', async () => {
@@ -859,7 +904,7 @@ function fakeFeedBase(options: {
         version,
         data
       })
-      return version
+      return { version }
     },
     async deleteContent() {
       return undefined
@@ -868,7 +913,7 @@ function fakeFeedBase(options: {
       if (options.conflictMeta?.includes(id)) {
         throw new WasSyncConflictError()
       }
-      return 1
+      return { version: 1 }
     }
   }
 }
@@ -949,11 +994,11 @@ describe('createPushHandler benign delete retry', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return serverVersion
+        return { version: serverVersion }
       },
       async deleteContent({ ifMatch }) {
         deletes.push(ifMatch)
-        if (ifMatch !== formatEtag(serverVersion)) {
+        if (ifMatch !== etagFor(serverVersion)) {
           throw new WasSyncConflictError()
         }
         return undefined
@@ -964,6 +1009,7 @@ describe('createPushHandler benign delete retry', () => {
       async get() {
         return {
           version: serverVersion,
+          etag: etagFor(serverVersion),
           updatedAt: '2026-02-02T00:00:00Z',
           data: serverData as never
         }
@@ -983,14 +1029,18 @@ describe('createPushHandler benign delete retry', () => {
     try {
       const conflicts = await push([
         {
-          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+          assumedMasterState: newDoc({
+            version: 0,
+            etag: etagFor(0),
+            data: { a: 1 }
+          }),
           newDocumentState: newDoc({ version: 0, _deleted: true })
         }
       ])
 
       // No conflict reported: the resource is gone, under the fresh ETag.
       expect(conflicts).toEqual([])
-      expect(port.deletes).toEqual([formatEtag(0), formatEtag(1)])
+      expect(port.deletes).toEqual([etagFor(0), etagFor(1)])
       // The re-issue is a swallow point the seam makes visible, at debug.
       expect(capture.events).toHaveLength(1)
       expect(capture.events[0]).toMatchObject({
@@ -1016,6 +1066,7 @@ describe('createPushHandler benign delete retry', () => {
       {
         assumedMasterState: newDoc({
           version: 0,
+          etag: etagFor(0),
           data: { a: 1, b: { c: 2, d: 3 } }
         }),
         newDocumentState: newDoc({ version: 0, _deleted: true })
@@ -1023,7 +1074,7 @@ describe('createPushHandler benign delete retry', () => {
     ])
 
     expect(conflicts).toEqual([])
-    expect(port.deletes).toEqual([formatEtag(0), formatEtag(1)])
+    expect(port.deletes).toEqual([etagFor(0), etagFor(1)])
   })
 
   it('converges a delete whose push ack write-back was torn', async () => {
@@ -1041,13 +1092,17 @@ describe('createPushHandler benign delete retry', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 0,
+          etag: etagFor(0),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 0, _deleted: true })
       }
     ])
 
     expect(conflicts).toEqual([])
-    expect(port.deletes).toEqual([formatEtag(0), formatEtag(1)])
+    expect(port.deletes).toEqual([etagFor(0), etagFor(1)])
   })
 
   it('reports a conflict when a 412-refused delete finds a changed body', async () => {
@@ -1064,14 +1119,18 @@ describe('createPushHandler benign delete retry', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 0,
+          etag: etagFor(0),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 0, _deleted: true })
       }
     ])
 
     // The body really changed remotely, so the delete is not re-issued.
     expect(port.writes).toEqual([
-      { kind: 'deleteContent', id: 'r1', ifMatch: formatEtag(0) }
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(0) }
     ])
     expect(conflicts).toEqual([
       {
@@ -1135,7 +1194,7 @@ describe('createPushHandler delete of an absent resource', () => {
       }
     ])
     // No revision is acked for the absent row; the sibling's create is.
-    expect(acks).toEqual([{ id: 'sibling', version: 1 }])
+    expect(acks).toEqual([{ id: 'sibling', version: 1, etag: etagFor(1) }])
   })
 
   it('treats a not-found delete conditional on an assumed revision as already gone', async () => {
@@ -1147,14 +1206,18 @@ describe('createPushHandler delete of an absent resource', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 3, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 3,
+          etag: etagFor(3),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 3, data: { a: 1 }, _deleted: true })
       }
     ])
 
     expect(conflicts).toEqual([])
     expect(port.writes).toEqual([
-      { kind: 'deleteContent', id: 'r1', ifMatch: formatEtag(3) }
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(3) }
     ])
     expect(port.getCalls).toEqual([])
   })
@@ -1169,7 +1232,7 @@ describe('createPushHandler delete of an absent resource', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return undefined
+        return { version: 0 } // never invoked on this delete-only push
       },
       async deleteContent({ ifMatch }) {
         deletes.push(ifMatch)
@@ -1184,6 +1247,7 @@ describe('createPushHandler delete of an absent resource', () => {
       async get() {
         return {
           version: 5,
+          etag: etagFor(5),
           updatedAt: '2026-02-02T00:00:00Z',
           data: { a: 1 } as never
         }
@@ -1193,13 +1257,17 @@ describe('createPushHandler delete of an absent resource', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 1, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({ version: 1, data: { a: 1 }, _deleted: true })
       }
     ])
 
     expect(conflicts).toEqual([])
-    expect(deletes).toEqual([formatEtag(1), formatEtag(5)])
+    expect(deletes).toEqual([etagFor(1), etagFor(5)])
   })
 
   it('matches the not-found signal by name alone, with no status', async () => {
@@ -1295,7 +1363,7 @@ describe('createPushHandler typed signals from another copy', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return 1
+        return { version: 1 }
       },
       async deleteContent() {
         return undefined

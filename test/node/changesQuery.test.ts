@@ -133,6 +133,44 @@ describe('wireDocToRxDoc', () => {
     expect('data' in rx).toBe(false)
   })
 
+  it('carries the opaque etag and metaEtag validators when present', () => {
+    const doc: WireDoc = {
+      id: 'abc',
+      _deleted: false,
+      updatedAt: '2026-01-01T00:00:00Z',
+      version: 3,
+      metaVersion: 2,
+      data: { hello: 'world' },
+      custom: { jwe: { ciphertext: '...' } },
+      etag: '"3mJr7AoUXx2.3"',
+      metaEtag: '"9pQz1BbVYy4.2"'
+    }
+    expect(wireDocToRxDoc(doc)).toEqual({
+      id: 'abc',
+      updatedAt: '2026-01-01T00:00:00Z',
+      version: 3,
+      metaVersion: 2,
+      data: { hello: 'world' },
+      custom: { jwe: { ciphertext: '...' } },
+      etag: '"3mJr7AoUXx2.3"',
+      metaEtag: '"9pQz1BbVYy4.2"',
+      _deleted: false
+    })
+  })
+
+  it('omits etag and metaEtag when the server recorded neither', () => {
+    const doc: WireDoc = {
+      id: 'abc',
+      _deleted: false,
+      updatedAt: '2026-01-01T00:00:00Z',
+      version: 3,
+      data: { hello: 'world' }
+    }
+    const rx = wireDocToRxDoc(doc)
+    expect('etag' in rx).toBe(false)
+    expect('metaEtag' in rx).toBe(false)
+  })
+
   it('omits createdBy when the server recorded no creator', () => {
     const doc: WireDoc = {
       id: 'abc',

@@ -1,5 +1,18 @@
 # @interop/was-sync Changelog
 
+## 0.2.0 - TBD
+
+### Changed
+
+- **Breaking:** `putContent` / `deleteContent` / `putMeta` on the sync port now
+  resolve a `WriteAck` (`{ version, etag? }`) instead of a bare revision number,
+  matching was-client's opaque `ETag` contract. `MasterState` / `WireDoc` /
+  `SyncedDoc` gain `etag` / `metaEtag`, and a conditional write's `ifMatch` is
+  now the validator echoed back verbatim -- it can no longer be rebuilt from a
+  version number. The replica schema's shape changed to carry the new fields,
+  so an existing replica is forgotten and re-pulled at the next login (schema
+  `version` stays `0`).
+
 ## 0.1.2 - 2026-09-07
 
 ### Added

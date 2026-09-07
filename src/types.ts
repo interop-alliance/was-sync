@@ -7,8 +7,8 @@
  * The driver moves stored bodies between a local replica and a remote WAS
  * Collection through the {@link WasSyncPort} seam. Nothing here imports RxDB or
  * `@interop/was-client` at runtime: the wire model (`Json`, `SyncCheckpoint`,
- * the base primary state) is was-client's, imported as types only, so a body
- * crosses the port boundary without a cast.
+ * the base primary state, the write acknowledgment) is was-client's, imported
+ * as types only, so a body crosses the port boundary without a cast.
  *
  * The wire contract follows the WAS `changes` feed and its V2
  * encrypted-metadata profile: a synced document carries both a content revision
@@ -28,7 +28,8 @@ import { canonicalize as jcsCanonicalize } from 'json-canonicalize'
 import type {
   Json,
   MasterState as ClientPrimaryState,
-  SyncCheckpoint as ClientSyncCheckpoint
+  SyncCheckpoint as ClientSyncCheckpoint,
+  WriteAck as ClientWriteAck
 } from '@interop/was-client/sync'
 
 /**
@@ -83,9 +84,10 @@ export function lwwFields(doc: unknown): LwwFields | null {
  * travels in ({@link WireDoc} on the feed, {@link SyncedDoc} locally,
  * {@link PrimaryState} on the conflict re-read): the independently-versioned
  * metadata revision and body, the content body, the content body's key-epoch
- * stamp, and the server-managed creator DID. Each is genuinely absent rather
- * than `undefined` when the server has nothing for it, so every mapping between
- * the shapes copies them conditionally -- see {@link copyOptionalBodyFields}.
+ * stamp, the server-managed creator DID, and the opaque `ETag` validators.
+ * Each is genuinely absent rather than `undefined` when the server has nothing
+ * for it, so every mapping between the shapes copies them conditionally -- see
+ * {@link copyOptionalBodyFields}.
  */
 export interface OptionalBodyFields {
   metaVersion?: number
@@ -97,6 +99,18 @@ export interface OptionalBodyFields {
    * rides the feed on a tombstone too, so it survives a delete.
    */
   createdBy?: string
+  /**
+   * The content `ETag`, quoted, exactly as the server emits it -- echo it back
+   * verbatim as a later content write's `ifMatch`. It can no longer be
+   * rebuilt from `version` alone, since the server's `ETag` also embeds a
+   * per-record generation marker ahead of the version.
+   */
+  etag?: string
+  /**
+   * The `/meta` object's `ETag`, quoted, exactly as the server emits it --
+   * echo it back verbatim as a later metadata write's `ifMatch`.
+   */
+  metaEtag?: string
 }
 
 /**
@@ -155,6 +169,12 @@ export function copyOptionalBodyFields({
   if (source.createdBy !== undefined) {
     target.createdBy = source.createdBy
   }
+  if (source.etag !== undefined) {
+    target.etag = source.etag
+  }
+  if (source.metaEtag !== undefined) {
+    target.metaEtag = source.metaEtag
+  }
 }
 
 /**
@@ -169,12 +189,18 @@ export type SyncCheckpoint = ClientSyncCheckpoint
 /**
  * One document as it travels on the `changes`-feed wire
  * (`POST /space/:s/:c/query`, profile `changes`). `id` is the WAS resourceId,
- * `version` is the content revision (feeds the content push `If-Match` ETag)
- * and the user content body is nested under `data`; `metaVersion` is the
- * independent metadata revision (feeds the `/meta` push `If-Match` ETag) and the
- * user-writable metadata body is under `custom`. A tombstone carries
+ * `version` is the content revision number and the user content body is
+ * nested under `data`; `metaVersion` is the independent metadata revision and
+ * the user-writable metadata body is under `custom`. A tombstone carries
  * `_deleted: true` with no `data`. `metaVersion` / `custom` are present only
  * once metadata has been written for the resource.
+ *
+ * `version` and `metaVersion` are for comparison/ordering only -- they are not
+ * usable `ifMatch` values on their own, since the server's `ETag` is an opaque
+ * string that embeds more than the revision number. `etag` and `metaEtag`
+ * carry those opaque validators, quoted exactly as the server emits them, so a
+ * puller can pass one back verbatim as a conditional write's `ifMatch` without
+ * a separate {@link WasSyncPort.get}.
  */
 export interface WireDoc {
   id: string
@@ -195,6 +221,16 @@ export interface WireDoc {
    * tombstones alike, and absent when the server recorded no creator.
    */
   createdBy?: string
+  /**
+   * The content `ETag`, quoted, exactly as the server emits it. Echo it back
+   * verbatim as a later content write's `ifMatch`.
+   */
+  etag?: string
+  /**
+   * The `/meta` object's `ETag`, quoted, exactly as the server emits it. Echo
+   * it back verbatim as a later metadata write's `ifMatch`.
+   */
+  metaEtag?: string
 }
 
 /**
@@ -226,6 +262,18 @@ export interface SyncedDoc {
    * row keeps the creator the server recorded.
    */
   createdBy?: string
+  /**
+   * The content `ETag`, quoted, exactly as the server last reported it (off
+   * the feed, a re-read, or a write's own ack). Echoed back verbatim as the
+   * next content write's `ifMatch` -- it is opaque and cannot be rebuilt from
+   * `version`.
+   */
+  etag?: string
+  /**
+   * The `/meta` object's `ETag`, quoted, exactly as the server last reported
+   * it. Echoed back verbatim as the next metadata write's `ifMatch`.
+   */
+  metaEtag?: string
 }
 
 /**
@@ -268,6 +316,17 @@ export interface PrimaryReadCache {
 }
 
 /**
+ * The acknowledgment a conditional write returns: the new revision number plus
+ * the opaque `etag` validator it lives behind, exactly as the server sent it.
+ * Pass `etag` back verbatim as a later write's `ifMatch` -- it can no longer be
+ * synthesized from the revision number alone, since the server's `ETag` also
+ * embeds a per-record generation marker ahead of it. `etag` is absent against a
+ * backend that does not version resources; was-client's own ack type, aliased
+ * here so the driver and the port agree by construction.
+ */
+export type WriteAck = ClientWriteAck
+
+/**
  * The write/query half of the injected WAS-access seam. was-client's
  * `createWasSyncPort` implements it; this package depends only on the
  * interface. Every method moves the stored body verbatim -- no codec, no key
@@ -303,12 +362,12 @@ export interface WasSyncBasePort {
 
   /**
    * Conditionally writes the content body verbatim (`PUT /:id`). Pass
-   * `ifNoneMatch: true` for a create-if-absent, or `ifMatch` (a quoted ETag over
-   * the content `version`) for an update-if-unchanged. `epoch` is the opaque
-   * key-epoch id the body was encrypted under, sent as the `Key-Epoch` header
-   * (an absent epoch clears any prior stamp on the server, per the `key-epochs`
-   * feature). Returns the new content `version` parsed from the response ETag
-   * (the acked revision), or `undefined` when the server does not supply one.
+   * `ifNoneMatch: true` for a create-if-absent, or `ifMatch` (the opaque `ETag`
+   * from a prior read/write, echoed back verbatim) for an update-if-unchanged.
+   * `epoch` is the opaque key-epoch id the body was encrypted under, sent as
+   * the `Key-Epoch` header (an absent epoch clears any prior stamp on the
+   * server, per the `key-epochs` feature). Returns the accepted write's
+   * {@link WriteAck}.
    *
    * @param options {object}
    * @param options.id {string}
@@ -316,7 +375,7 @@ export interface WasSyncBasePort {
    * @param [options.ifMatch] {string}
    * @param [options.ifNoneMatch] {boolean}
    * @param [options.epoch] {string}
-   * @returns {Promise<number | undefined>}
+   * @returns {Promise<WriteAck>}
    */
   putContent(options: {
     id: string
@@ -324,12 +383,12 @@ export interface WasSyncBasePort {
     ifMatch?: string
     ifNoneMatch?: boolean
     epoch?: string
-  }): Promise<number | undefined>
+  }): Promise<WriteAck>
 
   /**
    * Conditionally deletes a resource (writes a tombstone; `DELETE /:id`). Pass
-   * `ifMatch` (a quoted ETag over the content `version`) to delete only if
-   * unchanged. Returns the tombstone `version` parsed from the response ETag
+   * `ifMatch` (the opaque `ETag` from a prior read/write, echoed back verbatim)
+   * to delete only if unchanged. Returns the tombstone's new {@link WriteAck}
    * when the server supplies one (the reference server does not). A
    * spec-conformant server answers `204` for an authorized delete of an absent
    * resource. A `404` may either resolve `undefined` or reject with the
@@ -340,12 +399,12 @@ export interface WasSyncBasePort {
    * @param options {object}
    * @param options.id {string}
    * @param [options.ifMatch] {string}
-   * @returns {Promise<number | undefined>}
+   * @returns {Promise<WriteAck | undefined>}
    */
   deleteContent(options: {
     id: string
     ifMatch?: string
-  }): Promise<number | undefined>
+  }): Promise<WriteAck | undefined>
 
   /**
    * Conditionally writes the metadata body verbatim (`PUT /:id/meta`, body
@@ -353,24 +412,25 @@ export interface WasSyncBasePort {
    * `custom` member -- the server's metadata replace clears every property the
    * body omits), so removing a resource's metadata replicates rather than being
    * skipped. Pass `ifNoneMatch: true` when the resource has no metadata yet, or
-   * `ifMatch` (a quoted ETag over `metaVersion`) for an update-if-unchanged.
-   * The resource must already exist (the server does not create a resource from
-   * a `/meta` write). Returns the new `metaVersion` parsed from the response
-   * ETag, or `undefined` when the server does not supply one.
+   * `ifMatch` (the opaque `/meta` `ETag` from a prior read/write, echoed back
+   * verbatim) for an update-if-unchanged. The resource must already exist (the
+   * server does not create a resource from a `/meta` write). Returns the new
+   * metadata {@link WriteAck}, or `undefined` when the server does not supply
+   * one.
    *
    * @param options {object}
    * @param options.id {string}
    * @param [options.custom] {Json}   absent = write the cleared state
    * @param [options.ifMatch] {string}
    * @param [options.ifNoneMatch] {boolean}
-   * @returns {Promise<number | undefined>}
+   * @returns {Promise<WriteAck | undefined>}
    */
   putMeta(options: {
     id: string
     custom?: Json
     ifMatch?: string
     ifNoneMatch?: boolean
-  }): Promise<number | undefined>
+  }): Promise<WriteAck | undefined>
 }
 
 /**

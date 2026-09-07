@@ -21,7 +21,9 @@ describe('syncedDocSchema', () => {
       'custom',
       'data',
       'epoch',
+      'etag',
       'id',
+      'metaEtag',
       'metaVersion',
       'updatedAt',
       'version'

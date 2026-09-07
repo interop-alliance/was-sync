@@ -228,9 +228,10 @@ the byoe-ecosystem layer map instead.
 - **Conflict entry** -- the primary state the push handler returns for a row the
   server refused, which is what RxDB's push contract asks for. Avoid: conflict
   result, rejection.
-- **Ack** -- the server revision an accepted write earned (`PushWriteAck`),
-  written back into the local row so the next conditional write's `If-Match`
-  matches the server. Avoid: receipt, confirmation.
+- **Ack** -- the server revision and opaque `ETag` an accepted write earned
+  (`PushWriteAck`), written back into the local row so the next conditional
+  write's `If-Match` echoes what the server holds. Avoid: receipt,
+  confirmation.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a revision; it attributes history and breaks last-write-wins
   ties. Avoid: device id, replica id, client id (a client id is keyed and

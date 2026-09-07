@@ -282,6 +282,11 @@ export function createSyncController({
           continue
         }
         onStatus(key, id, 'idle')
+        // was-client's own `WasSyncPort` is not structurally assignable to
+        // this package's (its `data`/`custom` are `unknown`, ahead of this
+        // driver's own `Json`, and its `putMeta` is optional where this
+        // package always requires one), so the bridge goes through `unknown`.
+        // The `putMeta` check just below is what makes that narrowing sound.
         const basePort = createWasSyncPort({
           was: port.wasClient,
           spaceId: port.spaceId,

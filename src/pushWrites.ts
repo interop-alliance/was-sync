@@ -11,9 +11,10 @@
  * / `metaVersion`, at `PUT /:id/meta`). This handler diffs the new local state
  * against the assumed primary to route each half:
  *
- * - content changed -> `PUT /:id` (`If-Match: "<version>"`) or, on create,
- *   `PUT /:id` (`If-None-Match: *`); a delete -> `DELETE /:id`.
- * - metadata changed -> `PUT /:id/meta` (`If-Match: "<metaVersion>"`, or
+ * - content changed -> `PUT /:id` (`If-Match: <etag>`, the opaque validator
+ *   the assumed primary last reported) or, on create, `PUT /:id`
+ *   (`If-None-Match: *`); a delete -> `DELETE /:id`.
+ * - metadata changed -> `PUT /:id/meta` (`If-Match: <metaEtag>`, or
  *   `If-None-Match: *` when the resource has no metadata yet); a metadata
  *   CLEAR (the new state carries no `custom`) writes the cleared state rather
  *   than being skipped.
@@ -44,17 +45,17 @@
  *
  * RxDB's push contract asks only for *conflicts* back (the current primary state
  * of each rejected row), so a successful write's new `version` / `metaVersion`
- * is reported out-of-band: the response ETag of each accepted write is captured
- * and handed to the optional `onWriteAccepted` callback, which writes the acked
- * revision back into the local row (see `createWasReplication`). Without that
- * write-back the local `version` would stay one revision behind the server and
- * every subsequent conditional write would send a stale `If-Match` and 412. The
- * write-back only touches the revision fields (never `data` / `updatedAt`), so
- * the follow-up push cycle it triggers finds nothing changed to write and
- * settles -- no re-push loop.
+ * (and the opaque `etag` / `metaEtag` validators behind them) is reported
+ * out-of-band: each accepted write's {@link WriteAck} is captured and handed to
+ * the optional `onWriteAccepted` callback, which writes the acked state back
+ * into the local row (see `createWasReplication`). Without that write-back the
+ * local row would stay one revision behind the server and every subsequent
+ * conditional write would send a stale `If-Match` and 412. The write-back only
+ * touches the revision/etag fields (never `data` / `updatedAt`), so the
+ * follow-up push cycle it triggers finds nothing changed to write and settles
+ * -- no re-push loop.
  */
 import {
-  formatEtag,
   isSyncAuthError,
   isSyncConflictError,
   isSyncNotFoundError
@@ -64,21 +65,26 @@ import type {
   PrimaryState,
   SyncedDoc,
   WasSyncPort,
-  WithDeleted
+  WithDeleted,
+  WriteAck
 } from './types.js'
 import { bodiesEqual, copyOptionalBodyFields } from './types.js'
 import { log } from './log.js'
 
 /**
- * The acked server revisions of one row's accepted writes: the new content
- * `version` (from a `PUT /:id` or `DELETE /:id` response ETag) and/or the new
- * `metaVersion` (from a `PUT /:id/meta` response ETag). Absent fields mean the
- * corresponding write did not run or its response carried no ETag.
+ * The acked server state of one row's accepted writes: the new content
+ * `version` / `etag` (from a `PUT /:id` or `DELETE /:id`) and/or the new
+ * `metaVersion` / `metaEtag` (from a `PUT /:id/meta`). Absent fields mean the
+ * corresponding write did not run or its response carried no `ETag`. `etag` /
+ * `metaEtag` are opaque -- echo them back verbatim as a later write's
+ * `ifMatch` rather than reformatting `version` / `metaVersion`.
  */
 export interface PushWriteAck {
   id: string
   version?: number
+  etag?: string
   metaVersion?: number
+  metaEtag?: string
 }
 
 /**
@@ -162,6 +168,9 @@ async function pushRow({
 }> {
   const { id } = newDocumentState
   const assumedVersion = assumedMasterState?.version
+  const assumedEtag = assumedMasterState?.etag
+  const assumedMetaVersion = assumedMasterState?.metaVersion
+  const assumedMetaEtag = assumedMasterState?.metaEtag
   const isCreate = assumedMasterState === undefined
   const ack: PushWriteAck = { id }
   const hasAck = () =>
@@ -217,7 +226,7 @@ async function pushRow({
   const deleteAbsentAsDone = async (options: {
     id: string
     ifMatch?: string
-  }): Promise<number | undefined> => {
+  }): Promise<WriteAck | undefined> => {
     try {
       return await port.deleteContent(options)
     } catch (err) {
@@ -228,21 +237,19 @@ async function pushRow({
     }
   }
 
-  // Deletes the remote content conditional on the assumed revision, recovering
+  // Deletes the remote content conditional on the assumed etag, recovering
   // from the one benign `412`: a revision drift with an unchanged body (the
-  // header's delete note). A `412` with no assumed revision, an absent primary,
+  // header's delete note). A `412` with no assumed etag, an absent primary,
   // or a primary whose body really differs is rethrown, so the caller's conflict
   // path reports it unchanged.
-  const deleteWithBenignRetry = async (): Promise<number | undefined> => {
+  const deleteWithBenignRetry = async (): Promise<WriteAck | undefined> => {
     try {
       return await deleteAbsentAsDone({
         id,
-        ...(assumedVersion !== undefined && {
-          ifMatch: formatEtag(assumedVersion)
-        })
+        ...(assumedEtag !== undefined && { ifMatch: assumedEtag })
       })
     } catch (err) {
-      if (!isSyncConflictError(err) || assumedVersion === undefined) {
+      if (!isSyncConflictError(err) || assumedEtag === undefined) {
         throw err
       }
       const primary = await readPrimary()
@@ -259,7 +266,7 @@ async function pushRow({
       })
       return await deleteAbsentAsDone({
         id,
-        ifMatch: formatEtag(primary.version)
+        ...(primary.etag !== undefined && { ifMatch: primary.etag })
       })
     }
   }
@@ -267,9 +274,12 @@ async function pushRow({
   try {
     if (newDocumentState._deleted) {
       // Delete supersedes any metadata write: drop the content, tombstone wins.
-      const ackedVersion = await deleteWithBenignRetry()
-      if (ackedVersion !== undefined) {
-        ack.version = ackedVersion
+      const ackedDelete = await deleteWithBenignRetry()
+      if (ackedDelete !== undefined) {
+        ack.version = ackedDelete.version
+        if (ackedDelete.etag !== undefined) {
+          ack.etag = ackedDelete.etag
+        }
       }
       return { conflict: null, ack: ack.version !== undefined ? ack : null }
     }
@@ -280,7 +290,7 @@ async function pushRow({
     const contentChanged =
       isCreate || !bodiesEqual(newDocumentState.data, assumedMasterState?.data)
     if (contentChanged) {
-      const ackedVersion = await port.putContent({
+      const ackedContent = await port.putContent({
         id,
         data: newDocumentState.data ?? null,
         ...(newDocumentState.epoch !== undefined && {
@@ -288,12 +298,11 @@ async function pushRow({
         }),
         ...(isCreate
           ? { ifNoneMatch: true }
-          : assumedVersion !== undefined && {
-              ifMatch: formatEtag(assumedVersion)
-            })
+          : assumedEtag !== undefined && { ifMatch: assumedEtag })
       })
-      if (ackedVersion !== undefined) {
-        ack.version = ackedVersion
+      ack.version = ackedContent.version
+      if (ackedContent.etag !== undefined) {
+        ack.etag = ackedContent.etag
       }
     }
   } catch (err) {
@@ -316,18 +325,20 @@ async function pushRow({
   )
   if (metadataChanged) {
     try {
-      const assumedMetaVersion = assumedMasterState?.metaVersion
-      const ackedMetaVersion = await port.putMeta({
+      const ackedMeta = await port.putMeta({
         id,
         ...(newDocumentState.custom !== undefined && {
           custom: newDocumentState.custom
         }),
         ...(assumedMetaVersion !== undefined
-          ? { ifMatch: formatEtag(assumedMetaVersion) }
+          ? assumedMetaEtag !== undefined && { ifMatch: assumedMetaEtag }
           : { ifNoneMatch: true })
       })
-      if (ackedMetaVersion !== undefined) {
-        ack.metaVersion = ackedMetaVersion
+      if (ackedMeta !== undefined) {
+        ack.metaVersion = ackedMeta.version
+        if (ackedMeta.etag !== undefined) {
+          ack.metaEtag = ackedMeta.etag
+        }
       }
     } catch (err) {
       if (isSyncConflictError(err)) {

@@ -23,14 +23,14 @@ import { createPushHandler, type PushWriteAck } from './pushWrites.js'
 import { log } from './log.js'
 
 /**
- * Builds the push write-back: patches an accepted write's acked server
- * revision(s) (`version` / `metaVersion`) into the local row so the next
- * conditional write's `If-Match` matches the server. Skips rows that are gone
- * or already current (a tombstoned row is invisible to `findOne` and needs no
- * write-back -- nothing further is pushed for a deleted id). A failure is
- * logged at `warn` and swallowed: the write itself succeeded, and a missed
- * write-back only means the acked revision is adopted from the change feed's
- * echo on a later pull.
+ * Builds the push write-back: patches an accepted write's acked server state
+ * (`version` / `etag` and/or `metaVersion` / `metaEtag`) into the local row so
+ * the next conditional write's `If-Match` echoes what the server last
+ * reported. Skips rows that are gone or already current (a tombstoned row is
+ * invisible to `findOne` and needs no write-back -- nothing further is pushed
+ * for a deleted id). A failure is logged at `warn` and swallowed: the write
+ * itself succeeded, and a missed write-back only means the acked state is
+ * adopted from the change feed's echo on a later pull.
  *
  * @param rxCollection {RxCollection<SyncedDoc>}
  * @returns {(ack: PushWriteAck) => Promise<void>}
@@ -46,11 +46,17 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
       if (ack.version !== undefined && doc.get('version') !== ack.version) {
         patch.version = ack.version
       }
+      if (ack.etag !== undefined && doc.get('etag') !== ack.etag) {
+        patch.etag = ack.etag
+      }
       if (
         ack.metaVersion !== undefined &&
         doc.get('metaVersion') !== ack.metaVersion
       ) {
         patch.metaVersion = ack.metaVersion
+      }
+      if (ack.metaEtag !== undefined && doc.get('metaEtag') !== ack.metaEtag) {
+        patch.metaEtag = ack.metaEtag
       }
       if (Object.keys(patch).length > 0) {
         await doc.incrementalPatch(patch)

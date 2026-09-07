@@ -64,7 +64,7 @@ function fakeBasePort(
       }
     },
     async putContent() {
-      return undefined
+      return { version: 0 } // unused here; get() is what this suite exercises
     },
     async deleteContent() {
       return undefined
@@ -116,6 +116,34 @@ describe('withFeedPrimaryRead get', () => {
     expect(await port.get({ id: 'r1' })).toMatchObject({
       version: 7,
       epoch: 'e3'
+    })
+  })
+
+  it('carries the opaque etag and metaEtag validators into the primary state', async () => {
+    // The CORS-blocked deployment this seam exists for still needs a validator
+    // to echo back as the retry's `ifMatch`; the feed body carries it just
+    // like every other field this wrapper reads.
+    const base = fakeBasePort({
+      pages: [
+        [
+          wire({
+            id: 'r1',
+            version: 7,
+            data: { a: 1 },
+            metaVersion: 2,
+            etag: '"etag-7"',
+            metaEtag: '"etag-2"'
+          })
+        ]
+      ]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'r1' })).toMatchObject({
+      version: 7,
+      etag: '"etag-7"',
+      metaVersion: 2,
+      metaEtag: '"etag-2"'
     })
   })
 

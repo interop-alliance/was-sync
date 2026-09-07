@@ -4,14 +4,17 @@
 /**
  * The single generic RxDB JSON schema reused across every synced collection.
  * One shape (`{ id, updatedAt, version, metaVersion?, createdBy?, epoch?,
- * data?, custom? }`) carries both a content revision and an
+ * etag?, metaEtag?, data?, custom? }`) carries both a content revision and an
  * independently-versioned metadata sub-resource; `_deleted` is added by RxDB via
  * `deletedField`. `data` / `custom` are opaque bodies (plaintext JSON, or an EDV
  * envelope on an encrypted collection), so they are typed as free-form objects.
  * `createdBy` is the server-managed creator DID carried down from the `changes`
  * feed. `epoch` is the opaque key-epoch id the resource's envelope was encrypted
  * under (absent = pre-epoch, encrypted directly to the vault key), also carried
- * down the feed.
+ * down the feed. `etag` / `metaEtag` are the opaque `ETag` validators the
+ * server last reported for the content and `/meta` sub-resources -- echoed
+ * back verbatim as a later conditional write's `ifMatch`, since they can no
+ * longer be rebuilt from `version` / `metaVersion` alone.
  *
  * The return type is declared structurally rather than as RxDB's
  * `RxJsonSchema<SyncedDoc>`, so this module (and the root entry that exports it)
@@ -61,6 +64,11 @@ export function syncedDocSchema(): SyncedDocSchema {
       // The opaque key-epoch id the envelope was encrypted under, absent when
       // pre-epoch (encrypted directly to the vault key). Not indexed.
       epoch: { type: 'string', maxLength: 256 },
+      // The opaque `ETag` validators the server last reported for the content
+      // and `/meta` sub-resources, echoed back verbatim as a later conditional
+      // write's `ifMatch`. Not indexed.
+      etag: { type: 'string', maxLength: 256 },
+      metaEtag: { type: 'string', maxLength: 256 },
       // Opaque stored bodies -- content and metadata envelopes -- moved verbatim.
       data: { type: 'object', additionalProperties: true },
       custom: { type: 'object', additionalProperties: true }
