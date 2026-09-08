@@ -4,6 +4,12 @@
 
 ### Fixed
 
+- A delete with no assumed primary (a row created and deleted locally before the
+  replica's first push) is skipped instead of sent as a header-less `DELETE`.
+  Ids are content-addressed, so that unconditional delete tombstoned another
+  replica's live copy of the same id. The row is reported accepted with no ack;
+  the live copy stays on the server and comes down on its next feed change
+  (WS-3).
 - The `/meta` write's delete-race recovery now fires on the default port. A
   metadata-only edit against a resource another replica deleted used to reject
   the batch there (the recovery matched only the `mapAuthErrors` port's masked

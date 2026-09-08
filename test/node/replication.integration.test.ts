@@ -348,52 +348,101 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it('completes a batch whose delete targets a resource the server never held (default port)', async () => {
-    // A row deleted locally before its create was ever pushed: the batch
-    // carries a delete with no assumed primary. Per the spec the server answers
-    // `204` for an authorized delete of an absent resource (the teaching server
-    // does), so this pins the spec-conformant path against the real server; the
-    // not-found signal a `404` would raise on the default port is covered by
-    // the push unit suite. Either way the batch completes and the sibling lands.
-    const collection = await openCollection()
-    const { port, observer } = await openServerCollection()
-    const deletes: string[] = []
-    const rawDelete = port.deleteContent.bind(port)
-    port.deleteContent = async options => {
-      deletes.push(options.id)
-      return rawDelete(options)
-    }
-
-    await collection.insert({
-      id: 'cid-never-pushed',
+  it("skips a delete of a row it never pushed, leaving another replica's live copy intact", async () => {
+    // Ids are content-addressed and identical across replicas. Replica A
+    // creates r and pushes it; replica B creates the same r and deletes it
+    // before its first push, which RxDB coalesces to a delete with no assumed
+    // primary. B holds no server state for r, so the driver sends no `DELETE`
+    // (an unconditional one would tombstone A's copy) and the batch's sibling
+    // still lands. B's initial pull pages past the live r while the delete is
+    // still pending locally (RxDB defers a pulled state behind an un-pushed
+    // local change), so B keeps its tombstone until r next changes on the
+    // feed; the first such change brings A's live copy down to B.
+    const replicaA = await openCollection()
+    const { port: portA, observer } = await openServerCollection()
+    const replicationA = createWasReplication({
+      rxCollection: replicaA,
+      wasPort: portA,
+      replicationIdentifier: 'test-skip-delete-a'
+    })
+    await replicationA.awaitInitialReplication()
+    await replicaA.insert({
+      id: 'cid-shared',
       updatedAt: '000000000001',
       version: 0,
       data: { x: 1 }
     })
-    await (await collection.findOne('cid-never-pushed').exec())!.remove()
-    await collection.insert({
+    await eventually(
+      async () => (await observer.get({ id: 'cid-shared' })) !== null,
+      () => replicationA.reSync()
+    )
+    const live = await observer.get({ id: 'cid-shared' })
+    await replicationA.cancel()
+
+    const dbA = db
+    db = undefined
+    const replicaB = await openCollection()
+    const portB = createWasSyncPort({
+      was,
+      spaceId,
+      collectionId: `synced-${collectionSerial}`
+    }) as WasSyncPort
+    const deletes: string[] = []
+    const rawDelete = portB.deleteContent.bind(portB)
+    portB.deleteContent = async options => {
+      deletes.push(options.id)
+      return rawDelete(options)
+    }
+    await replicaB.insert({
+      id: 'cid-shared',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { x: 1 }
+    })
+    await (await replicaB.findOne('cid-shared').exec())!.remove()
+    await replicaB.insert({
       id: 'cid-sibling',
       updatedAt: '000000000002',
       version: 0,
       data: { x: 2 }
     })
 
-    const replication = createWasReplication({
-      rxCollection: collection,
-      wasPort: port,
-      replicationIdentifier: 'test-delete-absent'
+    const replicationB = createWasReplication({
+      rxCollection: replicaB,
+      wasPort: portB,
+      replicationIdentifier: 'test-skip-delete-b'
     })
     const errors: unknown[] = []
-    replication.error$.subscribe(err => errors.push(err))
-    await replication.awaitInitialReplication()
-    await replication.awaitInSync()
+    replicationB.error$.subscribe(err => errors.push(err))
+    await replicationB.awaitInitialReplication()
+    await replicationB.awaitInSync()
 
-    expect(deletes).toContain('cid-never-pushed')
+    expect(deletes).toEqual([])
     expect(errors).toEqual([])
-    expect(await observer.get({ id: 'cid-never-pushed' })).toBeNull()
+    // A's copy is intact, under the revision A's create earned.
+    expect(await observer.get({ id: 'cid-shared' })).toEqual(live)
     expect((await observer.get({ id: 'cid-sibling' }))?.data).toEqual({ x: 2 })
+    // B holds its local tombstone: the pull that paged past the live r found
+    // the delete still pending, and the skip then settled the row as pushed.
+    expect(await replicaB.findOne('cid-shared').exec()).toBeNull()
 
-    await replication.cancel()
+    // The next change to r on the server puts it back on the feed, and B,
+    // with nothing pending on the row, adopts A's live copy.
+    await observer.putMeta({
+      id: 'cid-shared',
+      custom: { touched: true },
+      ifNoneMatch: true
+    })
+    await eventually(
+      async () => (await replicaB.findOne('cid-shared').exec()) !== null,
+      () => replicationB.reSync()
+    )
+    expect(
+      (await replicaB.findOne('cid-shared').exec())?.toJSON().data
+    ).toEqual({ x: 1 })
+
+    await replicationB.cancel()
+    await dbA?.close()
   })
 
   it('pulls a server-side tombstone as a local delete', async () => {

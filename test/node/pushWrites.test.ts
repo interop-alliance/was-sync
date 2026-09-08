@@ -1293,20 +1293,49 @@ describe('createPushHandler benign delete retry', () => {
     ])
   })
 
-  it('leaves a 412 with no assumed revision to the conflict path', async () => {
-    // Nothing to compare a re-read body against, so the retry never fires.
+  it('skips a delete with no assumed primary and reports it accepted', async () => {
+    // Created and deleted locally before this replica's first push: nothing of
+    // this replica's is on the server, while another replica may hold a live
+    // resource under the same content-addressed id. No `If-Match` exists for
+    // "delete only what I created", so no `DELETE` goes out, no re-read runs,
+    // and the row is accepted with no ack (the create path's `If-None-Match`
+    // guard, mirrored). The batch's other rows still land.
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
     const port = fakePushPort({
-      conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary: { version: 2, updatedAt: '2026-02-02T00:00:00Z', data: { a: 1 } }
     })
-    const push = createPushHandler(port)
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler(port, async ack => {
+      acks.push(ack)
+    })
 
-    const conflicts = await push([
-      { newDocumentState: newDoc({ _deleted: true }) }
-    ])
+    try {
+      const conflicts = await push([
+        { newDocumentState: newDoc({ id: 'never-pushed', _deleted: true }) },
+        { newDocumentState: newDoc({ id: 'sibling', data: { a: 1 } }) }
+      ])
 
-    expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'r1' }])
-    expect(conflicts[0]).toMatchObject({ id: 'r1', version: 2 })
+      expect(conflicts).toEqual([])
+      expect(port.writes).toEqual([
+        {
+          kind: 'putContent',
+          id: 'sibling',
+          data: { a: 1 },
+          ifNoneMatch: true
+        }
+      ])
+      expect(port.getCalls).toEqual([])
+      expect(acks).toEqual([{ id: 'sibling', version: 1, etag: etagFor(1) }])
+      // The skip is a swallow point the seam makes visible, at debug.
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]).toMatchObject({
+        level: 'debug',
+        data: { id: 'never-pushed' }
+      })
+    } finally {
+      setLogger(previous)
+    }
   })
 })
 
@@ -1319,7 +1348,7 @@ describe('createPushHandler delete of an absent resource', () => {
     // neither advances by retrying, and the batch must complete rather than be
     // re-sent unchanged forever with its other rows never landing.
     const port = fakePushPort({
-      notFoundOn: { kind: 'deleteContent', id: 'never-pushed' }
+      notFoundOn: { kind: 'deleteContent', id: 'gone-remotely' }
     })
     const acks: PushWriteAck[] = []
     const push = createPushHandler(port, async ack => {
@@ -1328,14 +1357,24 @@ describe('createPushHandler delete of an absent resource', () => {
 
     const conflicts = await push([
       {
-        newDocumentState: newDoc({ id: 'never-pushed', _deleted: true })
+        assumedMasterState: newDoc({
+          id: 'gone-remotely',
+          version: 2,
+          etag: etagFor(2),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({
+          id: 'gone-remotely',
+          version: 2,
+          _deleted: true
+        })
       },
       { newDocumentState: newDoc({ id: 'sibling', data: { a: 1 } }) }
     ])
 
     expect(conflicts).toEqual([])
     expect(port.writes).toEqual([
-      { kind: 'deleteContent', id: 'never-pushed' },
+      { kind: 'deleteContent', id: 'gone-remotely', ifMatch: etagFor(2) },
       {
         kind: 'putContent',
         id: 'sibling',
@@ -1431,11 +1470,21 @@ describe('createPushHandler delete of an absent resource', () => {
     const push = createPushHandler(port)
 
     const conflicts = await push([
-      { newDocumentState: newDoc({ id: 'gone', _deleted: true }) }
+      {
+        assumedMasterState: newDoc({
+          id: 'gone',
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ id: 'gone', version: 1, _deleted: true })
+      }
     ])
 
     expect(conflicts).toEqual([])
-    expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'gone' }])
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'gone', ifMatch: etagFor(1) }
+    ])
   })
 
   it('still propagates a non-not-found delete error so RxDB retries the batch', async () => {
@@ -1446,7 +1495,12 @@ describe('createPushHandler delete of an absent resource', () => {
     const push = createPushHandler(port)
 
     await expect(
-      push([{ newDocumentState: newDoc({ id: 'r1', _deleted: true }) }])
+      push([
+        {
+          assumedMasterState: newDoc({ version: 1, etag: etagFor(1) }),
+          newDocumentState: newDoc({ version: 1, _deleted: true })
+        }
+      ])
     ).rejects.toThrow('network down')
   })
 })

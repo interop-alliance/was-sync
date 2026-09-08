@@ -13,7 +13,8 @@
  *
  * - content changed -> `PUT /:id` (`If-Match: <etag>`, the opaque validator
  *   the assumed primary last reported) or, on create, `PUT /:id`
- *   (`If-None-Match: *`); a delete -> `DELETE /:id`.
+ *   (`If-None-Match: *`); a delete -> `DELETE /:id` (`If-Match: <etag>`), or
+ *   no write at all when there is no assumed primary.
  * - metadata changed -> `PUT /:id/meta` (`If-Match: <metaEtag>`, or
  *   `If-None-Match: *` when the resource has no metadata yet); a metadata
  *   CLEAR (the new state carries no `custom`) writes the cleared state rather
@@ -21,6 +22,19 @@
  *
  * Content is written before metadata on a create, because the server rejects a
  * `/meta` write to a resource that does not yet exist.
+ *
+ * A delete with no assumed primary is skipped rather than sent. Such a row was
+ * created and deleted locally before this replica ever pushed it, so this
+ * replica holds no server state for it, but ids are content-addressed and
+ * identical across replicas, so another replica may hold a live resource under
+ * the same id. HTTP has no precondition for "delete only what I created" (an
+ * `If-Match` needs a validator this replica never had, and an unconditional
+ * `DELETE` would tombstone the other replica's copy), so the write is skipped
+ * and reported as accepted with no ack. RxDB then records the local tombstone
+ * as the assumed primary. A live copy already on the server stays there, and
+ * the next change to it on the feed brings it down to this replica, whose
+ * tombstone is by then settled and holds nothing pending against it. This is
+ * the create path's `If-None-Match: *` guard, mirrored.
  *
  * A delete carries one recovery of its own: the benign `412`. A locally created
  * row is pushed with the revision it was inserted with while the server assigns
@@ -306,6 +320,12 @@ async function pushRow({
 
   try {
     if (newDocumentState._deleted) {
+      // No assumed primary: this replica never pushed the row, so it holds no
+      // server state to delete (the header's skip note). Accepted, no ack.
+      if (assumedMasterState === undefined) {
+        log.debug('Delete of a row this replica never pushed; skipped', { id })
+        return { conflict: null, ack: null }
+      }
       // Delete supersedes any metadata write: drop the content, tombstone wins.
       const ackedDelete = await deleteWithBenignRetry()
       if (ackedDelete !== undefined) {

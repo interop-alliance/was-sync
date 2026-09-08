@@ -81,7 +81,21 @@ numbered so items and reviews can cite them.
    under a drifted revision is re-deleted against the fresh ETag; every other
    412 is a real conflict (`src/pushWrites.ts`). The push-ack write-back only
    makes the case rarer -- it is best-effort and swallows its own failure -- so
-   the retry stays the authority for deletes. A delete's `404` (was-client's
+   the retry stays the authority for deletes. A delete with no assumed primary
+   is skipped, not sent: the row was created and deleted locally before this
+   replica ever pushed it, so the replica holds no server state for it, while
+   another replica may hold a live resource under the same content-addressed id
+   (invariant 2). HTTP has no precondition for "delete only what I created" (an
+   `If-Match` needs a validator this replica never had, and a header-less
+   `DELETE` would tombstone the other replica's copy), so `src/pushWrites.ts`
+   issues no write and reports the row accepted with no ack, the create path's
+   `If-None-Match: *` guard mirrored. RxDB then settles the local tombstone as
+   the assumed primary. The replica keeps that tombstone until the resource next
+   changes on the feed (RxDB defers a pulled state behind a pending local
+   change, and the initial pull pages past the live copy while the delete is
+   still pending); the first such change brings the live copy down, since
+   nothing is pending against the row by then. The integration suite pins the
+   skip, the intact copy, and that convergence. A delete's `404` (was-client's
    not-found signal, matched by name) is the already-gone outcome on either
    delete call, not an error: a conformant server answers `204` for an
    authorized delete of an absent resource, so the `404` is a masked

@@ -22,29 +22,6 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 
 ---
 
-### WS-3: Delete with no assumed primary is sent unconditionally
-
-- status: todo
-- priority: high
-- labels: push, correctness, conditional-writes
-- acceptance:
-  - [ ] A delete whose `assumedMasterState` is undefined carries a precondition
-        or is skipped, symmetric with the create path's `ifNoneMatch` guard; the
-        chosen mechanism is recorded in ARCHITECTURE.md
-  - [ ] The push test for this branch (`test/node/pushWrites.test.ts` around
-        lines 1068-1082) is rewritten so the fake port no longer synthesizes a
-        412 that a real server would not send for a header-less DELETE
-  - [ ] A test shows a create-then-delete on replica B, before B's first push,
-        leaving replica A's live copy of the same content-addressed id intact
-
-Context: Ids are content-addressed and identical across replicas (invariant 2).
-Replica A creates row r and pushes it. Replica B creates the same r locally and
-deletes it before its first push. RxDB coalesces that to a delete with no
-assumed primary, and `src/pushWrites.ts:197` issues `deleteContent({ id })` with
-no `If-Match`. The server returns 204 and A's live resource is tombstoned by a
-replica that never synced it. The create path guards itself with `ifNoneMatch`;
-the delete path has no symmetric guard.
-
 ### WS-5: Benign-412 delete retry can delete an independently re-created resource
 
 - status: todo
