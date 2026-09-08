@@ -100,7 +100,17 @@ numbered so items and reviews can cite them.
    considered and rejected on 2026-09-07: it would put WAS at odds with the HTTP
    semantics the spec borrows, for a gain confined to one race (a third replica
    re-creating and re-deleting in between), which the changes feed already
-   surfaces as higher-version entries for the next pull to reconcile.
+   surfaces as higher-version entries for the next pull to reconcile. The
+   `/meta` half of a resurrection is a create-if-absent for the same reason: a
+   tombstone entry carries no `custom` and no `metaVersion`, so the handler
+   compares the local `custom` against nothing and sends `If-None-Match: *`, and
+   against the teaching server, whose tombstone drops the metadata object and
+   retires its validator, both halves land in one push cycle. A server that kept
+   the metadata object through a tombstone would answer that create with a
+   `412`, which costs one extra cycle (the re-read, a metadata conflict entry, a
+   resolution) rather than failing the row. The integration suite pins both the
+   one-cycle path and the refusal of a `/meta` `If-Match` carrying the
+   pre-delete validator.
 5. **Cross-package errors match by `err.name`, never `instanceof`.** Every error
    this driver classifies is was-client's, raised inside a seam the app injects,
    and that seam can resolve to a second copy of was-client. The predicates come

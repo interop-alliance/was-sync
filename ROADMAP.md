@@ -286,38 +286,3 @@ once; and nothing pins it against drift. The prefix `sync` joins the namespace
 list in the logging package's README (`fw`, `wc`, `wr`, `dcw`). One seam
 replaces two, per the greenfield stance; consumers lose an option from each
 builder.
-
-### WS-13: Pin the resurrection path's `/meta` write against the live server
-
-- status: todo
-- priority: medium
-- labels: push, metadata, tombstones, integration-test
-- touches:
-  - was-sync: `test/node/replication.integration.test.ts`
-  - was-teaching-server: WAS-89 (the metadata validator across a soft
-    delete); the case below is the client-side check that its fix holds
-  - wallet-attached-storage-spec: WASS-28 (the lifecycle rule the case
-    asserts)
-- acceptance:
-  - [ ] An integration case resurrects a tombstoned row that carries `custom`
-        and asserts both halves land in one push cycle: the content write
-        under `If-None-Match: *`, then the `/meta` write under
-        `If-None-Match: *`, with no 412 and no conflict-handler invocation
-  - [ ] The same case asserts that a `/meta` `If-Match` carrying the
-        pre-delete metadata `ETag` is refused with 412 after the re-create,
-        so a stale replica cannot clobber the resurrected row's `custom`
-  - [ ] ARCHITECTURE.md's push-handler notes record that the `/meta` half of a
-        resurrection is a create-if-absent, and that a server keeping the
-        metadata object through a tombstone would cost one extra cycle (a
-        412, a re-read, a conflict resolution) rather than fail
-
-The current resurrection integration test covers the content half only. The
-push handler compares the new local `custom` against the assumed primary's,
-and a tombstone entry has none, so the `/meta` write goes out as a
-create-if-absent. Against the teaching server that is exactly right, because
-its tombstone drops `custom` and `metaVersion`. It also depends on the server
-not reusing the pre-delete metadata validator after the re-create, which the
-server currently does (WAS-89): the meta `ETag` is `<generation>.<metaVersion>`
-with the generation kept through the tombstone and `metaVersion` restarting at
-1. The second acceptance point is what catches that class of defect from the
-driver's side.

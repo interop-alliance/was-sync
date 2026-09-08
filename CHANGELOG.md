@@ -1,5 +1,18 @@
 # @interop/was-sync Changelog
 
+## 0.2.1 - TBD
+
+### Fixed
+
+- Fix the was-client dependency from link to npm.
+
+### Tests
+
+- The live-server integration suite now covers resurrecting a row that carries
+  `custom`: the content create and the `/meta` create-if-absent land in one push
+  cycle with a single conflict resolution, and a `/meta` `If-Match` carrying the
+  pre-delete metadata `ETag` is refused with 412 after the re-create.
+
 ## 0.2.0 - 2026-09-07
 
 ### Changed

@@ -134,3 +134,44 @@ create-if-absent is the one path that resurrects it and `If-Match` against a
 tombstone is refused whatever validator is sent, the surviving generation ETag
 included. The integration suite drives the scenario against the live server on
 the plain port and asserts one refused update followed by exactly one create.
+
+### WS-13: Pin the resurrection path's `/meta` write against the live server
+
+- status: done
+- done: 2026-09-07
+- priority: medium
+- labels: push, metadata, tombstones, integration-test
+- touches:
+  - was-sync: `test/node/replication.integration.test.ts`
+  - was-teaching-server: WAS-89 (the metadata validator across a soft delete);
+    the case below is the client-side check that its fix holds
+  - wallet-attached-storage-spec: WASS-28 (the lifecycle rule the case asserts)
+- acceptance:
+  - [x] An integration case resurrects a tombstoned row that carries `custom`
+        and asserts both halves land in one push cycle: the content write under
+        `If-None-Match: *`, then the `/meta` write under `If-None-Match: *`,
+        with no 412 and no conflict-handler invocation
+  - [x] The same case asserts that a `/meta` `If-Match` carrying the pre-delete
+        metadata `ETag` is refused with 412 after the re-create, so a stale
+        replica cannot clobber the resurrected row's `custom`
+  - [x] ARCHITECTURE.md's push-handler notes record that the `/meta` half of a
+        resurrection is a create-if-absent, and that a server keeping the
+        metadata object through a tombstone would cost one extra cycle (a 412, a
+        re-read, a conflict resolution) rather than fail
+
+The current resurrection integration test covers the content half only. The push
+handler compares the new local `custom` against the assumed primary's, and a
+tombstone entry has none, so the `/meta` write goes out as a create-if-absent.
+Against the teaching server that is exactly right, because its tombstone drops
+`custom` and `metaVersion`. It also depends on the server not reusing the
+pre-delete metadata validator after the re-create. The server used to (WAS-89):
+the meta `ETag` was `<generation>.<metaVersion>` with the generation kept
+through the tombstone and `metaVersion` restarting at 1. The server now gives
+the metadata object a generation of its own, dropped with the tombstone. The
+second acceptance point is what catches that class of defect from the driver's
+side.
+
+Shipped 2026-09-07: the case `resurrects a row carrying custom` in
+`test/node/replication.integration.test.ts`, pinned against the local server
+checkout (the `link:` dependency), plus the push-handler note in
+ARCHITECTURE.md.

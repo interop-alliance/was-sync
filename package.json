@@ -57,7 +57,7 @@
     "@eslint/js": "^10.0.1",
     "@interop/ed25519-verification-key": "^8.1.0",
     "@interop/logger": "^0.2.0",
-    "@interop/was-client": "link:../was-client",
+    "@interop/was-client": "^0.52.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^26.0.1",
     "@vitest/coverage-v8": "^4.1.7",
@@ -71,7 +71,7 @@
     "typescript-eslint": "^8.59.4",
     "vite": "^8.0.14",
     "vitest": "^4.1.7",
-    "was-teaching-server": "link:../was-teaching-server"
+    "was-teaching-server": "^0.27.0"
   },
   "publishConfig": {
     "access": "public",

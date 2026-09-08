@@ -28,7 +28,8 @@ import { WasClient } from '@interop/was-client'
 import {
   createWasSyncPort,
   deriveSpaceId,
-  ensureSpaceAndCollection
+  ensureSpaceAndCollection,
+  isSyncConflictError
 } from '@interop/was-client/sync'
 import { createWasReplication } from '../../src/wasReplication.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
@@ -54,6 +55,7 @@ beforeAll(async () => {
   // request; zcap invocation targets embed it, so it must match exactly.
   app = createApp({
     serverUrl: 'http://localhost',
+    logger: false,
     backend: new FileSystemBackend({ dataDir, capacityBytes: Infinity })
   })
   await app.listen({ port: 0 })
@@ -107,18 +109,25 @@ async function openServerCollection(): Promise<{
  * `lww` set, the package's last-write-wins conflict handler is installed over
  * plaintext bodies; otherwise RxDB's default (remote wins) applies.
  */
-async function openCollection({ lww = false }: { lww?: boolean } = {}) {
+async function openCollection({
+  lww = false,
+  onConflict
+}: { lww?: boolean; onConflict?: () => void } = {}) {
   db = await createRxDatabase({
     name: 'synctest' + Math.floor(performance.now()).toString(36),
     storage: getRxStorageMemory(),
     multiInstance: false
   })
+  const resolve = lwwResolver({ decrypt: async envelope => envelope })
   const { synced } = await db.addCollections({
     synced: {
       schema: syncedDocSchema(),
       ...(lww && {
         conflictHandler: makeConflictHandler({
-          resolve: lwwResolver({ decrypt: async envelope => envelope })
+          resolve: async input => {
+            onConflict?.()
+            return resolve(input)
+          }
         })
       })
     }
@@ -600,6 +609,133 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       { ifNoneMatch: true }
     ])
     expect(errors).toEqual([])
+
+    await replication.cancel()
+  })
+
+  it('resurrects a row carrying custom: the /meta half is a create, and the pre-delete meta ETag is dead', async () => {
+    // The tombstone drops the metadata object together with `custom`, so the
+    // push handler's `/meta` write on a resurrection goes out as a
+    // create-if-absent (`If-None-Match: *`) and lands in the same push cycle
+    // as the content create. The server also retires the pre-delete metadata
+    // validator with the tombstone: its generation dies with the metadata
+    // object, so a stale replica's `If-Match` cannot clobber the resurrected
+    // row's `custom`.
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+    const metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+    const recordPrecondition = (
+      into: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>,
+      { ifMatch, ifNoneMatch }: { ifMatch?: string; ifNoneMatch?: boolean }
+    ) =>
+      into.push({
+        ...(ifMatch !== undefined && { ifMatch }),
+        ...(ifNoneMatch !== undefined && { ifNoneMatch })
+      })
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      recordPrecondition(contentWrites, options)
+      return rawPut(options)
+    }
+    const rawPutMeta = port.putMeta.bind(port)
+    port.putMeta = async options => {
+      recordPrecondition(metaWrites, options)
+      return rawPutMeta(options)
+    }
+    const created = await observer.putContent({
+      id: 'cid-resurrect-meta',
+      data: {
+        step: 'server-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+    })
+    const createdMeta = await observer.putMeta({
+      id: 'cid-resurrect-meta',
+      custom: { name: 'Before', tags: {} },
+      ifNoneMatch: true
+    })
+    const preDeleteMetaEtag = createdMeta?.etag
+    expect(preDeleteMetaEtag).toBeDefined()
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-resurrect-meta'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-resurrect-meta').exec()
+    expect(pulled?.toJSON().custom).toEqual({ name: 'Before', tags: {} })
+    expect(pulled?.toJSON().metaEtag).toBe(preDeleteMetaEtag)
+
+    await observer.deleteContent({
+      id: 'cid-resurrect-meta',
+      ifMatch: created.etag
+    })
+    expect(await observer.get({ id: 'cid-resurrect-meta' })).toBeNull()
+    await pulled!.incrementalPatch({
+      data: {
+        step: 'local-2',
+        updatedAt: '2026-01-01T00:00:03Z',
+        writerId: 'a'
+      },
+      custom: { name: 'After', tags: { starred: 'yes' } },
+      updatedAt: '000000000003'
+    })
+
+    await eventually(async () => {
+      const primary = await observer.get({ id: 'cid-resurrect-meta' })
+      return (
+        stepOf(primary?.data) === 'local-2' && primary?.custom !== undefined
+      )
+    })
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-resurrect-meta').exec()
+        const primary = await observer.get({ id: 'cid-resurrect-meta' })
+        return (
+          current?.toJSON().etag === primary?.etag &&
+          current?.toJSON().metaEtag === primary?.metaEtag
+        )
+      },
+      () => replication.reSync()
+    )
+
+    // The content half: one refused update, then one create. The metadata
+    // half: exactly one write, a create-if-absent, accepted first time. The
+    // only conflict resolved is the content 412 against the tombstone; the
+    // `/meta` write raised none.
+    expect(contentWrites).toEqual([
+      { ifMatch: created.etag },
+      { ifNoneMatch: true }
+    ])
+    expect(metaWrites).toEqual([{ ifNoneMatch: true }])
+    expect(conflicts).toBe(1)
+    expect(errors).toEqual([])
+    const primary = await observer.get({ id: 'cid-resurrect-meta' })
+    expect(primary?.custom).toEqual({ name: 'After', tags: { starred: 'yes' } })
+    expect(primary?.metaEtag).not.toBe(preDeleteMetaEtag)
+
+    // A replica still holding the pre-delete metadata validator is refused:
+    // its `If-Match` is a 412, not a clobber.
+    await expect(
+      observer.putMeta({
+        id: 'cid-resurrect-meta',
+        custom: { name: 'Stale', tags: {} },
+        ifMatch: preDeleteMetaEtag
+      })
+    ).rejects.toSatisfy(isSyncConflictError)
+    expect((await observer.get({ id: 'cid-resurrect-meta' }))?.custom).toEqual({
+      name: 'After',
+      tags: { starred: 'yes' }
+    })
 
     await replication.cancel()
   })
