@@ -40,7 +40,7 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 Context: Ids are content-addressed and identical across replicas (invariant 2).
 Replica A creates row r and pushes it. Replica B creates the same r locally and
 deletes it before its first push. RxDB coalesces that to a delete with no
-assumed master, and `src/pushWrites.ts:197` issues `deleteContent({ id })` with
+assumed primary, and `src/pushWrites.ts:197` issues `deleteContent({ id })` with
 no `If-Match`. The server returns 204 and A's live resource is tombstoned by a
 replica that never synced it. The create path guards itself with `ifNoneMatch`;
 the delete path has no symmetric guard.

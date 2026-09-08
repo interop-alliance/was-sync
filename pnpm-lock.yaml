@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.52.0
-        version: 0.52.0(@interop/jsonld-signatures@11.8.5)
+        specifier: ^0.53.0
+        version: 0.53.0(@interop/jsonld-signatures@11.8.5)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -70,8 +70,8 @@ importers:
         specifier: ^4.1.7
         version: 4.1.11(@types/node@26.4.1)(@vitest/coverage-v8@4.1.11)(vite@8.2.2(@types/node@26.4.1)(terser@5.51.2)(yaml@2.9.0))
       was-teaching-server:
-        specifier: ^0.27.0
-        version: 0.27.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
+        specifier: ^0.28.0
+        version: 0.28.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
 
 packages:
 
@@ -420,10 +420,6 @@ packages:
     resolution: {integrity: sha512-WxnkYKmg4y0eSMlXVUPlzHkZlWSRVlyjTBRQkrEtcmPY5A7gw/K/ANB9S8YPtOVWreV+RAATEvjF56CJGDU3Yg==}
     engines: {node: '>=24.0'}
 
-  '@interop/storage-core@0.10.0':
-    resolution: {integrity: sha512-I2XJAaUlT3rfFm6jthsDWCAcbgzpIyqx3556aiqLKFcFNYDEi4Mu2+PqMK3hI4nGGMPypNFdQPdTa4Wo+lsQSg==}
-    engines: {node: '>=22.0'}
-
   '@interop/storage-core@0.11.0':
     resolution: {integrity: sha512-Kh9iyeUZXq6bY4rQdLrapOlab3gY8gH8YTMqam/IKfyJqaLe9NpE+ha/p5oDpwjnv5XPF4F6itIlu/GQu/wprw==}
     engines: {node: '>=22.0'}
@@ -432,12 +428,12 @@ packages:
     resolution: {integrity: sha512-YF+qMjuBn+ehqqY+dKNRF6k34f0uvWh+ojzg+mC71TPtJ6B/7+Qjm8MTYPFRfoW8wekEoSB525a1uto+mMfoKQ==}
     engines: {node: '>=22.0'}
 
-  '@interop/vh-resource-log@0.4.1':
-    resolution: {integrity: sha512-wP7/x9+TOo0DF9OmKgAhSRgOnvQrJlWReL3IsxX3/9jxyFEbdIZ+CV62uoplM3VbjYPSX9VJCzd0LZtHhNOPlQ==}
+  '@interop/vh-resource-log@0.4.2':
+    resolution: {integrity: sha512-ppy+NBi23kMCPJeIEh+LmbR2U88qZaoiEZ42rxWoFBtejYteq4/5IuwgrZCcDytgqkxRSBDDHqu3hwZuPMIMig==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.52.0':
-    resolution: {integrity: sha512-oRwvil96A+pzDNIgLdYVf/D6mgOBIEZLOlSkT51xWOM2p82UNlxjonhR/WhDCDi93eZBWUQGTiGYKa/neLS6lA==}
+  '@interop/was-client@0.53.0':
+    resolution: {integrity: sha512-yE8E6hQO9ZLchpSk0HkcrliALQy9cvjjT8q0+USaP5TALbKH7TBpViE0fYVUiQ+PRyeXewYyNebuiUx0pCfWqQ==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.3.0':
@@ -2645,8 +2641,8 @@ packages:
   walker@1.0.8:
     resolution: {integrity: sha512-ts/8E8l5b7kY0vlWLewOkDXMmPdLcVV4GmOQLyxuSswIJsweeFZtAsMF7k1Nszz+TYBQrlYRmzOnr398y1JemQ==}
 
-  was-teaching-server@0.27.0:
-    resolution: {integrity: sha512-+TQcABTkN+wn/f3juoNRe3mY2KzvV1/422njaKdY/1eCJtJ4PJ1VhimW7y7Arubtyr7nL7JXZwH4eTaLdSd8Yg==}
+  was-teaching-server@0.28.0:
+    resolution: {integrity: sha512-W5pnyPZ7FC0n3IbUZUtTIGiv4jr22Mxen1PUoMmSDoPX6/3Jo+HCk/ymx6rcD29o8FZqgzSHwrN2Isn0MxYQbg==}
     engines: {node: '>=24.0'}
 
   whatwg-fetch@3.6.20:
@@ -3190,10 +3186,6 @@ snapshots:
 
   '@interop/social-core@0.8.1': {}
 
-  '@interop/storage-core@0.10.0':
-    dependencies:
-      '@interop/data-integrity-core': 8.7.1
-
   '@interop/storage-core@0.11.0':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
@@ -3202,12 +3194,12 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.7.1
 
-  '@interop/vh-resource-log@0.4.1':
+  '@interop/vh-resource-log@0.4.2':
     dependencies:
       '@interop/did-method-webvh': 5.8.0
       '@interop/storage-core': 0.9.1
 
-  '@interop/was-client@0.52.0(@interop/jsonld-signatures@11.8.5)':
+  '@interop/was-client@0.53.0(@interop/jsonld-signatures@11.8.5)':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
       '@interop/ed25519-signature': 7.2.1(@interop/jsonld-signatures@11.8.5)
@@ -3216,7 +3208,7 @@ snapshots:
       '@interop/http-client': 1.0.5
       '@interop/minimal-cipher': 7.10.0
       '@interop/storage-core': 0.11.0
-      '@interop/vh-resource-log': 0.4.1
+      '@interop/vh-resource-log': 0.4.2
       '@interop/x25519-key-agreement-key': 5.3.0
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
@@ -5434,7 +5426,7 @@ snapshots:
     dependencies:
       makeerror: 1.0.12
 
-  was-teaching-server@0.27.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8)):
+  was-teaching-server@0.28.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8)):
     dependencies:
       '@digitalcredentials/bnid': 5.0.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
       '@fastify/cors': 11.3.0
@@ -5454,9 +5446,10 @@ snapshots:
       '@interop/lru-memoize': 4.0.3
       '@interop/minimal-cipher': 7.10.0
       '@interop/security-document-loader': 10.1.1
-      '@interop/storage-core': 0.10.0
+      '@interop/storage-core': 0.11.0
       '@interop/x25519-key-agreement-key': 5.3.0
       '@interop/zcap': 11.1.0
+      '@scure/base': 2.4.0
       fastify: 5.12.3
       fastify-plugin: 6.0.0
       fs-json-store: 8.0.1

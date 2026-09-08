@@ -1,5 +1,11 @@
 # @interop/was-sync Changelog
 
+## 0.2.2 - TBD
+
+### Changed
+
+- Update to latest was-client.
+
 ## 0.2.1 - 2026-09-07
 
 ### Fixed
