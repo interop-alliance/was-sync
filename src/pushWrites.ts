@@ -87,6 +87,23 @@ import { bodiesEqual, copyOptionalBodyFields } from './types.js'
 import { log } from './log.js'
 
 /**
+ * Whether a `/meta` write's rejection is the not-found shape on either port
+ * configuration: the default port's not-found signal, or the `mapAuthErrors`
+ * port's auth signal carrying the masked `404`. One classifier for both, so
+ * the recovery below cannot be reachable on one port and not the other. Both
+ * are name matches (invariant 5).
+ *
+ * @param err {unknown}
+ * @returns {boolean}
+ */
+function isMetaNotFound(err: unknown): boolean {
+  return (
+    isSyncNotFoundError(err) ||
+    (isSyncAuthError(err) && (err as { status?: unknown }).status === 404)
+  )
+}
+
+/**
  * The acked server state of one row's accepted writes: the new content
  * `version` / `etag` (from a `PUT /:id` or `DELETE /:id`) and/or the new
  * `metaVersion` / `metaEtag` (from a `PUT /:id/meta`). Absent fields mean the
@@ -363,23 +380,23 @@ async function pushRow({
       // Corroborate before condemnation: under WAS 404-masking a `/meta` 404
       // is ambiguous -- expired access, or an ordinary race with a remote
       // delete (a PUT to the `/meta` of a nonexistent resource legitimately
-      // 404s). An independent request decides: re-read the primary off the
-      // changes feed. A feed read that is itself denied rethrows its own auth
-      // error (access genuinely expired, so the controller escalates); a feed
-      // that answers with an absent/deleted primary confirms the delete race,
-      // and the row is resolved with that tombstone as the conflict entry
-      // (the conflict handler reconciles it) instead of flipping the whole
-      // session to "access expired" and wedging the batch in RxDB's retries.
-      if (
-        isSyncAuthError(err) &&
-        (err as { status?: unknown }).status === 404
-      ) {
+      // 404s). The default port raises it as the not-found signal, a
+      // `mapAuthErrors` port as the auth signal with `status: 404`; both take
+      // this path. An independent request decides: re-read the primary off
+      // the changes feed. A feed read that is itself denied rethrows its own
+      // auth error (access genuinely expired, so the controller escalates); a
+      // feed that answers with an absent/deleted primary confirms the delete
+      // race, and the row is resolved with that tombstone as the conflict
+      // entry (the conflict handler reconciles it) instead of rejecting the
+      // batch -- which would wedge it in RxDB's retries, or on the auth port
+      // flip the whole session to "access expired".
+      if (isMetaNotFound(err)) {
         const primary = await readPrimary()
         if (primary === null || primary.deleted) {
           return conflictOutcome(primary)
         }
         // The resource is alive and readable while its `/meta` write 404s:
-        // the write itself was rejected, so the auth signal stands.
+        // the write itself was rejected, so the original signal stands.
       }
       throw err
     }

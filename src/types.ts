@@ -416,7 +416,11 @@ export interface WasSyncBasePort {
    * verbatim) for an update-if-unchanged. The resource must already exist (the
    * server does not create a resource from a `/meta` write). Returns the new
    * metadata {@link WriteAck}, or `undefined` when the server does not supply
-   * one.
+   * one. A `404` (the resource was deleted by another replica) rejects with
+   * the not-found signal (`err.name === 'WasSyncNotFoundError'`) on the default
+   * port, or the auth signal carrying `status: 404` on a `mapAuthErrors` port;
+   * the push handler corroborates either against the changes feed before
+   * treating it as a delete race.
    *
    * @param options {object}
    * @param options.id {string}

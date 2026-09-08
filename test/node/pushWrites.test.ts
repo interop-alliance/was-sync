@@ -926,34 +926,97 @@ describe('createPushHandler metadata 404 corroboration', () => {
     ).rejects.toMatchObject({ name: 'WasSyncAuthError', status: 403 })
   })
 
-  it('propagates the original 404 when the primary is alive and readable', async () => {
-    // The resource exists and the feed serves it, yet its /meta write 404s:
-    // the write itself was rejected, so the auth signal stands.
+  it('resolves a metadata-only edit against a gone primary on the default port', async () => {
+    // The default port raises a /meta 404 as the plain not-found signal, not
+    // the auth signal. Replica A deleted the resource; this replica edited
+    // only its metadata, so no content write runs and the /meta write is the
+    // first to learn of the delete. Same corroboration, same tombstone
+    // conflict entry -- the batch does not reject.
     const port = fakePushPort({
-      auth404On: { kind: 'putMeta', id: 'r1' },
-      primary: {
-        version: 3,
-        updatedAt: '2026-03-03T00:00:00Z',
-        deleted: false,
-        data: { a: 1 }
-      }
+      notFoundOn: { kind: 'putMeta', id: 'r1' },
+      primary: null
     })
-    const push = createPushHandler(port)
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler(port, async ack => {
+      acks.push(ack)
+    })
 
-    await expect(
-      push([
-        {
-          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
-          newDocumentState: newDoc({
-            version: 0,
-            data: { a: 1 },
-            custom: { jwe: 'mine' }
-          })
-        }
-      ])
-    ).rejects.toMatchObject({ name: 'WasSyncAuthError', status: 404 })
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 3,
+          etag: etagFor(3),
+          data: { a: 1 },
+          custom: { jwe: 'theirs' },
+          metaVersion: 1,
+          metaEtag: etagFor(1)
+        }),
+        newDocumentState: newDoc({
+          version: 3,
+          etag: etagFor(3),
+          data: { a: 1 },
+          custom: { jwe: 'mine' },
+          metaVersion: 1,
+          metaEtag: etagFor(1)
+        })
+      }
+    ])
+
+    expect(port.writes.map(write => write.kind)).toEqual(['putMeta'])
     expect(port.getCalls).toEqual(['r1'])
+    expect(conflicts).toEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-01-01T00:00:00Z',
+        version: 0,
+        _deleted: true
+      }
+    ])
+    expect(acks).toEqual([])
   })
+
+  it.each([
+    {
+      shape: 'the plain not-found on the default port',
+      port: 'notFoundOn' as const,
+      expected: { name: 'WasSyncNotFoundError' }
+    },
+    {
+      shape: 'the auth 404',
+      port: 'auth404On' as const,
+      expected: { name: 'WasSyncAuthError', status: 404 }
+    }
+  ])(
+    'propagates $shape when the primary is alive and readable',
+    async ({ port: portShape, expected }) => {
+      // The resource exists and the feed serves it, yet its /meta write 404s:
+      // the write itself was rejected, so the original signal stands.
+      const port = fakePushPort({
+        [portShape]: { kind: 'putMeta', id: 'r1' },
+        primary: {
+          version: 3,
+          updatedAt: '2026-03-03T00:00:00Z',
+          deleted: false,
+          data: { a: 1 }
+        }
+      })
+      const push = createPushHandler(port)
+
+      await expect(
+        push([
+          {
+            assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+            newDocumentState: newDoc({
+              version: 0,
+              data: { a: 1 },
+              custom: { jwe: 'mine' }
+            })
+          }
+        ])
+      ).rejects.toMatchObject(expected)
+      expect(port.getCalls).toEqual(['r1'])
+    }
+  )
 })
 
 /**

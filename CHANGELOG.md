@@ -1,5 +1,18 @@
 # @interop/was-sync Changelog
 
+## 0.2.3 - TBD
+
+### Fixed
+
+- The `/meta` write's delete-race recovery now fires on the default port. A
+  metadata-only edit against a resource another replica deleted used to reject
+  the batch there (the recovery matched only the `mapAuthErrors` port's masked
+  `404`), so RxDB retried the same write forever. One classifier now takes the
+  default port's not-found signal and the auth port's `status: 404` to the same
+  corroborating feed re-read, and the row resolves as a tombstone conflict
+  entry. Needs `@interop/was-client` 0.54.0, whose default-port `putMeta` raises
+  the not-found signal (WS-4).
+
 ## 0.2.2 - 2026-09-08
 
 ### Changed

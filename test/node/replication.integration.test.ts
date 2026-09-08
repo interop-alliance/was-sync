@@ -145,6 +145,37 @@ function stepOf(data: Json | undefined): unknown {
 }
 
 /**
+ * Wraps the port's two writes to record the precondition each one carried, so
+ * a test can assert the exact conditional-write sequence the driver issued.
+ */
+function recordPreconditionsOn(port: WasSyncPort): {
+  contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>
+  metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>
+} {
+  const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+  const metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+  const record = (
+    into: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>,
+    { ifMatch, ifNoneMatch }: { ifMatch?: string; ifNoneMatch?: boolean }
+  ) =>
+    into.push({
+      ...(ifMatch !== undefined && { ifMatch }),
+      ...(ifNoneMatch !== undefined && { ifNoneMatch })
+    })
+  const rawPut = port.putContent.bind(port)
+  port.putContent = async options => {
+    record(contentWrites, options)
+    return rawPut(options)
+  }
+  const rawPutMeta = port.putMeta.bind(port)
+  port.putMeta = async options => {
+    record(metaWrites, options)
+    return rawPutMeta(options)
+  }
+  return { contentWrites, metaWrites }
+}
+
+/**
  * Waits until `predicate` holds, nudging replication and polling. Avoids
  * depending on exact RxDB cycle timing.
  */
@@ -547,16 +578,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     // or an unconditional overwrite.
     const collection = await openCollection({ lww: true })
     const { port, observer } = await openServerCollection()
-    const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
-    const rawPut = port.putContent.bind(port)
-    port.putContent = async options => {
-      const { ifMatch, ifNoneMatch } = options
-      contentWrites.push({
-        ...(ifMatch !== undefined && { ifMatch }),
-        ...(ifNoneMatch !== undefined && { ifNoneMatch })
-      })
-      return rawPut(options)
-    }
+    const { contentWrites } = recordPreconditionsOn(port)
     const created = await observer.putContent({
       id: 'cid-resurrect',
       data: {
@@ -627,26 +649,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       onConflict: () => (conflicts += 1)
     })
     const { port, observer } = await openServerCollection()
-    const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
-    const metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
-    const recordPrecondition = (
-      into: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>,
-      { ifMatch, ifNoneMatch }: { ifMatch?: string; ifNoneMatch?: boolean }
-    ) =>
-      into.push({
-        ...(ifMatch !== undefined && { ifMatch }),
-        ...(ifNoneMatch !== undefined && { ifNoneMatch })
-      })
-    const rawPut = port.putContent.bind(port)
-    port.putContent = async options => {
-      recordPrecondition(contentWrites, options)
-      return rawPut(options)
-    }
-    const rawPutMeta = port.putMeta.bind(port)
-    port.putMeta = async options => {
-      recordPrecondition(metaWrites, options)
-      return rawPutMeta(options)
-    }
+    const { contentWrites, metaWrites } = recordPreconditionsOn(port)
     const created = await observer.putContent({
       id: 'cid-resurrect-meta',
       data: {
@@ -736,6 +739,84 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       name: 'After',
       tags: { starred: 'yes' }
     })
+
+    await replication.cancel()
+  })
+
+  it('recovers a metadata-only edit against a resource another replica deleted (default port)', async () => {
+    // Replica B deletes X; this replica, offline, edits only X's metadata. On
+    // reconnect no content write runs (the body is unchanged), so the `/meta`
+    // `If-Match` is the first write to meet the tombstone and the server
+    // answers 404. The default port raises that as the not-found signal; the
+    // push handler corroborates it off the feed, resolves the row as a
+    // tombstone conflict, and the live local edit wins: the next cycle
+    // re-creates the content and the metadata. The batch never rejects.
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { contentWrites, metaWrites } = recordPreconditionsOn(port)
+    const created = await observer.putContent({
+      id: 'cid-meta-race',
+      data: {
+        step: 'server-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+    })
+    const createdMeta = await observer.putMeta({
+      id: 'cid-meta-race',
+      custom: { name: 'Before', tags: {} },
+      ifNoneMatch: true
+    })
+    const preDeleteMetaEtag = createdMeta?.etag
+    expect(preDeleteMetaEtag).toBeDefined()
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-meta-race'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-meta-race').exec()
+    expect(pulled?.toJSON().metaEtag).toBe(preDeleteMetaEtag)
+
+    await observer.deleteContent({ id: 'cid-meta-race', ifMatch: created.etag })
+    expect(await observer.get({ id: 'cid-meta-race' })).toBeNull()
+    await pulled!.incrementalPatch({
+      custom: { name: 'After', tags: { starred: 'yes' } },
+      updatedAt: '000000000003'
+    })
+
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-meta-race').exec()
+        const primary = await observer.get({ id: 'cid-meta-race' })
+        return (
+          current?.toJSON().etag === primary?.etag &&
+          current?.toJSON().metaEtag === primary?.metaEtag
+        )
+      },
+      () => replication.reSync()
+    )
+
+    // The metadata half: the refused `If-Match` against the tombstone, then a
+    // create-if-absent. The content half: no write until the tombstone
+    // conflict resolved, then exactly one create. One conflict, no error.
+    expect(metaWrites).toEqual([
+      { ifMatch: preDeleteMetaEtag },
+      { ifNoneMatch: true }
+    ])
+    expect(contentWrites).toEqual([{ ifNoneMatch: true }])
+    expect(conflicts).toBe(1)
+    expect(errors).toEqual([])
+    const primary = await observer.get({ id: 'cid-meta-race' })
+    expect(stepOf(primary?.data)).toBe('server-1')
+    expect(primary?.custom).toEqual({ name: 'After', tags: { starred: 'yes' } })
 
     await replication.cancel()
   })

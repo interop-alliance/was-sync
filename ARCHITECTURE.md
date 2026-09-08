@@ -87,15 +87,22 @@ numbered so items and reviews can cite them.
    authorized delete of an absent resource, so the `404` is a masked
    authorization refusal that no retry can advance, and rethrowing it would pin
    the whole batch in RxDB's retry loop. Revoked access still surfaces on the
-   next feed pull. A tombstone is absent for preconditions: a `412` whose
-   re-read resolves `null` builds a tombstone conflict entry with `version: 0`
-   and no `etag` (the plain port cannot tell a tombstone from a resource that
-   never existed, and both take the same next write), and an assumed primary
-   with `_deleted: true` routes a content write to `If-None-Match: *` and a
-   delete to an unconditional `DELETE`, since `If-Match` against a tombstone is
-   refused whatever validator it carries. That refusal is RFC 9110's rule, not a
-   server quirk: a tombstone has no current representation (which is why `GET`
-   answers `404`), and against no representation `If-None-Match: *` is true and
+   next feed pull. A `/meta` write's `404` is likewise not an error on its own:
+   a metadata-only edit against a resource another replica deleted is the same
+   delete race, raised as the not-found signal on the default port and as the
+   auth signal with `status: 404` on a `mapAuthErrors` port. One classifier in
+   `src/pushWrites.ts` takes both shapes to the same corroborating feed re-read,
+   and an absent or tombstoned primary resolves the row as a tombstone conflict
+   entry for the conflict handler; a primary that is alive rethrows the original
+   signal. A tombstone is absent for preconditions: a `412` whose re-read
+   resolves `null` builds a tombstone conflict entry with `version: 0` and no
+   `etag` (the plain port cannot tell a tombstone from a resource that never
+   existed, and both take the same next write), and an assumed primary with
+   `_deleted: true` routes a content write to `If-None-Match: *` and a delete to
+   an unconditional `DELETE`, since `If-Match` against a tombstone is refused
+   whatever validator it carries. That refusal is RFC 9110's rule, not a server
+   quirk: a tombstone has no current representation (which is why `GET` answers
+   `404`), and against no representation `If-None-Match: *` is true and
    `If-Match` with any tag is false. Honoring the tombstone's surviving ETag was
    considered and rejected on 2026-09-07: it would put WAS at odds with the HTTP
    semantics the spec borrows, for a gain confined to one race (a third replica

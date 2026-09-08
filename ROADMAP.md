@@ -45,34 +45,6 @@ no `If-Match`. The server returns 204 and A's live resource is tombstoned by a
 replica that never synced it. The create path guards itself with `ifNoneMatch`;
 the delete path has no symmetric guard.
 
-### WS-4: The `/meta` 404 delete-race recovery is unreachable on the default port
-
-- status: todo
-- priority: high
-- labels: push, metadata, correctness, was-client-port
-- acceptance:
-  - [ ] The `/meta` write's not-found branch matches the plain `NotFoundError`
-        shape as well as the `mapAuthErrors: true` shape, by `err.name`
-  - [ ] A push test on the default port shape shows a metadata-only edit against
-        a tombstoned resource resolving as the comment at
-        `src/pushWrites.ts:290-299` describes, rather than rejecting the batch
-  - [ ] Shared with WS-1: one predicate or helper classifies not-found across
-        both port configurations, so the two branches cannot drift again
-
-Context: The recovery branch at `src/pushWrites.ts:302` is gated on
-`isSyncAuthError && status === 404`, a shape only a `mapAuthErrors: true` port
-raises. With the flag off, was-client's `putMeta` throws a plain `NotFoundError`
-that matches neither branch and falls through to `throw err`. Replica A deletes
-contact X; replica B, offline, edits only X's metadata. B reconnects,
-`contentChanged` is false so no content write runs, `PUT /X/meta` 404s against
-the tombstone, the batch rejects, and RxDB retries the same write forever. This
-is exactly the wedge the surrounding comment says the branch exists to prevent,
-on the default port configuration. WS-1 settled the shared predicate as
-was-client's `isSyncNotFoundError` (`err.name === 'WasSyncNotFoundError'`); note
-the default port's `putMeta` currently raises a plain `NotFoundError` that this
-predicate does not match, so the `/meta` half likely needs was-client to raise
-the sync signal there (an in-house change).
-
 ### WS-5: Benign-412 delete retry can delete an independently re-created resource
 
 - status: todo
