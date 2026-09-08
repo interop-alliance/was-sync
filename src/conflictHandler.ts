@@ -19,10 +19,22 @@
  * caller supplies, so no cipher, key, or descriptor reaches this module. The
  * default resolver takes a `decrypt` closure and never a key.
  *
+ * The unknown-epoch refresh rule reaches this module the same way. An epoch
+ * rotation emits no change-feed entry, so a conflict side can be sealed under
+ * an epoch the caller's cipher has never seen; the once-per-session re-read
+ * and retry that mends it is `@interop/was-client/edv`'s
+ * (`createRefreshingEdvDocCipher`, whose decrypt is the closure a consumer
+ * hands in). This module runs no refresh of its own: an `undecryptable` side
+ * is whatever the closure could not open after its own policy ran, and the
+ * warning names which of was-client's two no-key classes it was
+ * (`isUnknownEpochError` / `isKeyUnwrapError`, matched by `err.name`), so a
+ * reader can tell a spent refresh from a key this reader was never given.
+ *
  * `isEqual` stays cheap and synchronous, as RxDB requires: a structural compare
  * of the opaque bodies plus the server revisions.
  */
 import { remotePayloadWins } from '@interop/social-core'
+import { isKeyUnwrapError, isUnknownEpochError } from '@interop/was-client/sync'
 import { bodiesEqual, lwwFields } from './types.js'
 import type { Json, LwwFields, SyncedDoc, WithDeleted } from './types.js'
 import { log } from './log.js'
@@ -168,6 +180,28 @@ async function lwwFieldsOf(
 }
 
 /**
+ * Names why a side did not decrypt, for the undecryptable-side warnings:
+ * `unknown-epoch` (the envelope's epoch is on no descriptor this reader holds,
+ * so the caller's refresh either ran and was spent or was never wired),
+ * `key-unwrap` (the epoch is listed and this reader was never a recipient, or
+ * was removed and the epoch rotated), or `other`.
+ *
+ * @param err {unknown}
+ * @returns {'unknown-epoch' | 'key-unwrap' | 'other'}
+ */
+function undecryptableReason(
+  err: unknown
+): 'unknown-epoch' | 'key-unwrap' | 'other' {
+  if (isUnknownEpochError(err)) {
+    return 'unknown-epoch'
+  }
+  if (isKeyUnwrapError(err)) {
+    return 'key-unwrap'
+  }
+  return 'other'
+}
+
+/**
  * The last-write-wins resolver: the default decision {@link makeConflictHandler}
  * is built with, and the one every replica applies independently to converge.
  *
@@ -210,7 +244,10 @@ async function lwwFieldsOf(
  *
  * @param options {object}
  * @param options.decrypt {(envelope: Json) => Promise<Json>}   this
- *   collection's decrypt, read lazily by the caller so a cipher swap is honored
+ *   collection's decrypt, read lazily by the caller so a cipher swap is
+ *   honored; on an encrypted collection, a refreshing cipher's
+ *   (`createRefreshingEdvDocCipher` in `@interop/was-client/edv`), so an
+ *   unseen-epoch side is re-read once before it counts as undecryptable
  * @param [options.payloadWins] {(remote: LwwFields, local: LwwFields) => boolean}
  *   the total-order comparator; defaults to social-core's `remotePayloadWins`
  *   (later `updatedAt` wins, `writerId` breaks a tie)
@@ -257,7 +294,11 @@ export function lwwResolver({
         log.warn(
           'LWW conflict: the remote state did not decrypt; adopting it ' +
             'rather than re-pushing the local payload over it.',
-          { id: realMasterState.id, err: remote.err }
+          {
+            id: realMasterState.id,
+            reason: undecryptableReason(remote.err),
+            err: remote.err
+          }
         )
         return 'remote'
       }
@@ -265,7 +306,11 @@ export function lwwResolver({
         log.warn(
           'LWW conflict: the local row did not decrypt; re-asserting it ' +
             'rather than dropping the local edit for the remote state.',
-          { id: newDocumentState.id, err: local.err }
+          {
+            id: newDocumentState.id,
+            reason: undecryptableReason(local.err),
+            err: local.err
+          }
         )
         return 'local'
       }
@@ -274,6 +319,10 @@ export function lwwResolver({
           '(deterministic and convergent).',
         {
           id: realMasterState.id,
+          reason:
+            remote.kind === 'undecryptable'
+              ? undecryptableReason(remote.err)
+              : undefined,
           err: remote.kind === 'undecryptable' ? remote.err : undefined
         }
       )

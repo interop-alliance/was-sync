@@ -72,7 +72,10 @@ stored content body (plaintext JSON, or an EDV envelope on an encrypted
 collection) and `custom` is the stored metadata body; encrypting and decrypting
 stay above this layer. The one place a decision cannot be body-opaque is a
 mutable-head conflict, whose sides have to be compared: that decision is
-injected as a closure, so no cipher, key, or descriptor reaches this package.
+injected as a closure, so no cipher, key, or descriptor reaches this package. On
+an encrypted collection that closure should be a refreshing cipher's decrypt
+(`createRefreshingEdvDocCipher` from `@interop/was-client/edv`), which carries
+the once-per-session unknown-epoch re-read; the driver runs no refresh itself.
 
 The writer id is an unkeyed, clearable, unrecoverable attribution label, never
 an identity: it derives from no secret, and it can vanish and be re-minted with

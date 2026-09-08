@@ -23,9 +23,12 @@ const SEALED = 'sealed-under-an-unseen-epoch'
 const decrypt = async (envelope: Json): Promise<Json> => {
   const { jwe } = envelope as { jwe: Json }
   if (jwe === SEALED) {
-    // Shaped like the real UnknownEpochError: the decrypt THROWS rather than
-    // returning a payload with no LWW stamp.
-    throw new Error('Unknown key epoch "e9".')
+    // Shaped like the real UnknownEpochError (matched by `err.name`, the
+    // cross-package rule): the decrypt THROWS rather than returning a payload
+    // with no LWW stamp.
+    const err = new Error('Unknown key epoch "e9".')
+    err.name = 'UnknownEpochError'
+    throw err
   }
   return jwe
 }
@@ -279,6 +282,11 @@ describe('makeLwwConflictHandler', () => {
     })
     expect(winner).toBe(primary)
     expect(logged('warn')).toHaveLength(1)
+    // The warning names was-client's no-key class, so a reader can tell a
+    // spent (or unwired) refresh from a key this reader was never given.
+    expect(logged('warn')[0]?.data).toMatchObject({
+      reason: 'unknown-epoch'
+    })
   })
 
   it('re-asserts an undecryptable local row rather than dropping the local edit', async () => {

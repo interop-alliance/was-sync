@@ -72,8 +72,17 @@ numbered so items and reviews can cite them.
    coordinating.
 3. **Every content push carries the row's `Key-Epoch` stamp.** The stamp rides
    `SyncedDoc.epoch` from the feed and back out through `putContent`; the header
-   itself belongs to was-client's port, and the policy for refreshing a stale
-   descriptor belongs to the consuming app.
+   itself belongs to was-client's port. The driver runs no unknown-epoch refresh
+   of its own, since it holds no cipher to rebuild (invariant 1). The rule is
+   `@interop/was-client/edv`'s, and it reaches the driver through the one seam
+   that decrypts anything, the default resolver's `decrypt` closure: a consumer
+   hands in a refreshing cipher's decrypt (`createRefreshingEdvDocCipher`),
+   which re-reads the descriptor once per session and retries before an
+   unseen-epoch side counts as undecryptable. The undecryptable-side warnings
+   name which of was-client's two no-key classes the side was
+   (`reason: 'unknown-epoch' | 'key-unwrap' | 'other'`, through the `./sync`
+   predicates), so a spent or unwired refresh is distinguishable from a key this
+   reader was never given.
 4. **The benign 412 delete retry.** A locally created row is pushed with the
    revision it was inserted with while the server assigns its own, so a delete
    conditional on a stale revision would be refused forever and leave the
@@ -223,8 +232,10 @@ numbered so items and reviews can cite them.
 - **A conflict policy for a particular collection** belongs to the consuming
   app, as the injected resolver. A wallet delegates to its own contacts
   comparator; an app framework compares decrypted stamps through the default.
-- **Key material, ciphers, key epochs, and descriptor-refresh policy** belong to
-  `@interop/was-client/edv` and to each consuming app.
+- **Key material, ciphers, key epochs, and the descriptor-refresh policy**
+  belong to `@interop/was-client/edv` (`createRefreshingEdvDocCipher`,
+  `DescriptorRefreshPolicy`, `acquireDescriptor`); wiring them into a
+  collection's decrypt belongs to each consuming app.
 - **The session gates** (guest, no remote configured, no local replica) belong
   to each app's binding, ahead of the controller core.
 - **The status store, the i18n, and the platform wiring** belong to each app.

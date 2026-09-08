@@ -1,5 +1,19 @@
 # @interop/was-sync Changelog
 
+## 0.2.4 - TBD
+
+### Changed
+
+- The undecryptable-side conflict warnings carry a `reason` (`unknown-epoch`,
+  `key-unwrap`, or `other`), classified through `@interop/was-client/sync`'s
+  `isUnknownEpochError` and `isKeyUnwrapError`, so a spent or unwired descriptor
+  refresh is told apart from a key this reader was never given.
+- Documented where the unknown-epoch refresh rule sits relative to the driver:
+  it runs inside the injected `decrypt` closure, which on an encrypted
+  collection should be `@interop/was-client/edv`'s
+  `createRefreshingEdvDocCipher`. The driver holds no cipher and runs no refresh
+  of its own.
+
 ## 0.2.3 - 2026-09-08
 
 ### Changed
