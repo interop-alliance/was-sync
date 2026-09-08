@@ -75,7 +75,11 @@ Do not add test files to `tsconfig.json` — they would be emitted into `dist/`.
   builds first and runs under `vitest.packaging.config.ts`). It walks the
   emitted module and declaration graphs to hold the root entry free of `rxdb`
   (ARCHITECTURE.md invariant 14). It is not part of `test:node`, because it
-  asserts over `dist/`.
+  asserts over `dist/`. A change under `src/` is not verified until this suite
+  is green too: it pins the exact set of modules the root entry reaches at
+  runtime, so a new import in the root graph fails it even when `test:node`
+  passes. Run `pnpm run test:packaging` alongside `test:node`, or `pnpm test`
+  for the full sequence.
 - `test/browser/` — Playwright smoke test (`pnpm run test:browser`); loads the
   ROOT entry in real Chromium via a Vite dev server (`pnpm run dev`), which is
   the entry a consumer must be able to load with `rxdb` absent.
