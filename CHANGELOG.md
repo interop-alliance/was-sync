@@ -1,5 +1,11 @@
 # @interop/was-sync Changelog
 
+## 0.2.5 - TBD
+
+### Fixed
+
+- Fix pnpm workspace, bump latest was-teaching-server devDep.
+
 ## 0.2.4 - 2026-09-08
 
 ### Changed
