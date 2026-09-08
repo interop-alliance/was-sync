@@ -2,6 +2,15 @@
 
 ## 0.2.3 - TBD
 
+### Changed
+
+- The controller assigns `@interop/was-client`'s sync port directly, and
+  `WireDoc` is aliased from the client like the other wire types. The `unknown`
+  cast and the runtime `putMeta` probe are gone, since `@interop/was-client`
+  0.54.0 types the port as what it implements, so a divergence in any port
+  member is now a compile error at the seam rather than an `error$` event inside
+  a push or pull cycle (WS-10).
+
 ### Fixed
 
 - A delete with no assumed primary (a row created and deleted locally before the

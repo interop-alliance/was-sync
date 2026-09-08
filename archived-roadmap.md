@@ -230,3 +230,33 @@ assumed primary, and `src/pushWrites.ts:197` issues `deleteContent({ id })` with
 no `If-Match`. The server returns 204 and A's live resource is tombstoned by a
 replica that never synced it. The create path guards itself with `ifNoneMatch`;
 the delete path has no symmetric guard.
+
+### WS-10: Drop the port cast and `putMeta` probe once was-client's port type is complete
+
+- status: done (2026-09-08)
+- priority: low
+- labels: controller, types, was-client-port
+- touches:
+  - was-client: shipped -- `WasSyncPort.putMeta` is required and `WireDoc` /
+    `SyncPage` type the feed bodies as `Json` (WCL-39, 0.54.0)
+  - was-sync: shipped -- `src/controller.ts` assigns the client's port directly;
+    `WireDoc` aliases was-client's
+  - was-react: shipped -- `src/storage/wasSyncPort.ts` returns the client's port
+    as is
+- acceptance:
+  - [x] was-client's port type matches what `createWasSyncPort` implements
+        (in-house change; was-client WCL-39)
+  - [x] `src/controller.ts` (around line 300) has no
+        `as unknown as     WasSyncPort` cast and no runtime
+        `typeof basePort.putMeta` probe
+  - [x] was-react's copy of the workaround is removed
+  - [x] `touches:` entries resolved
+
+Context: was-client types `putMeta` as optional on its `WasSyncPort` while
+`createWasSyncPort` always implements it. Both this driver and was-react cast
+through `unknown` and probe at runtime. The cast silences every future
+divergence in `query` / `putContent` / `deleteContent` / `get`, not just
+`putMeta`: a was-client rename type-checks clean here and fails only inside a
+push or pull cycle as an `error$` event. Two consumers carrying the same
+cast-and-probe is the signal that the fix belongs upstream, after which the
+divergence becomes a compile error at the seam.

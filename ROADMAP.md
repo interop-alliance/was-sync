@@ -146,34 +146,6 @@ rather than one. That is slower than k concurrent unmemoized walks. The existing
 "walks again for an id the memo never saw" test demonstrates the re-walk, and
 both "one walk" tests place every id on one page.
 
-### WS-10: Drop the port cast and `putMeta` probe once was-client's port type is complete
-
-- status: todo
-- priority: low
-- labels: controller, types, was-client-port
-- touches:
-  - was-client (`createWasSyncPort` return type gains a required `putMeta`, or a
-    full-port type is exported)
-  - was-sync (remove the cast and probe in `src/controller.ts`)
-  - was-react (remove the identical workaround in `wasSyncPort.ts:64-74`)
-- acceptance:
-  - [ ] was-client's port type matches what `createWasSyncPort` implements
-        (in-house change; reference the was-client item)
-  - [ ] `src/controller.ts` (around line 300) has no
-        `as unknown as     WasSyncPort` cast and no runtime
-        `typeof basePort.putMeta` probe
-  - [ ] was-react's copy of the workaround is removed
-  - [ ] `touches:` entries resolved
-
-Context: was-client types `putMeta` as optional on its `WasSyncPort` while
-`createWasSyncPort` always implements it. Both this driver and was-react cast
-through `unknown` and probe at runtime. The cast silences every future
-divergence in `query` / `putContent` / `deleteContent` / `get`, not just
-`putMeta`: a was-client rename type-checks clean here and fails only inside a
-push or pull cycle as an `error$` event. Two consumers carrying the same
-cast-and-probe is the signal that the fix belongs upstream, after which the
-divergence becomes a compile error at the seam.
-
 ### WS-12: Adopt the ecosystem logging library port
 
 - status: in-progress

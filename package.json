@@ -57,7 +57,7 @@
     "@eslint/js": "^10.0.1",
     "@interop/ed25519-verification-key": "^8.1.0",
     "@interop/logger": "^0.2.0",
-    "@interop/was-client": "^0.53.0",
+    "@interop/was-client": "^0.54.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^26.0.1",
     "@vitest/coverage-v8": "^4.1.7",
@@ -101,7 +101,7 @@
   "homepage": "https://github.com/interop-alliance/was-sync",
   "bugs": "https://github.com/interop-alliance/was-sync/issues",
   "peerDependencies": {
-    "@interop/was-client": "^0.49.0",
+    "@interop/was-client": "^0.54.0",
     "rxdb": "^17.0.0"
   },
   "peerDependenciesMeta": {

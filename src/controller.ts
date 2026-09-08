@@ -282,12 +282,10 @@ export function createSyncController({
           continue
         }
         onStatus(key, id, 'idle')
-        // was-client's own `WasSyncPort` is not structurally assignable to
-        // this package's (its `data`/`custom` are `unknown`, ahead of this
-        // driver's own `Json`, and its `putMeta` is optional where this
-        // package always requires one), so the bridge goes through `unknown`.
-        // The `putMeta` check just below is what makes that narrowing sound.
-        const basePort = createWasSyncPort({
+        // was-client's port is this package's `WasSyncPort` by construction
+        // (the wire types are aliased from it), so a divergence in either
+        // fails to compile here rather than inside a push or pull cycle.
+        const basePort: WasSyncPort = createWasSyncPort({
           was: port.wasClient,
           spaceId: port.spaceId,
           collectionId: id,
@@ -295,12 +293,7 @@ export function createSyncController({
           ...(port.mapAuthErrors !== undefined && {
             mapAuthErrors: port.mapAuthErrors
           })
-        }) as unknown as WasSyncPort
-        if (typeof basePort.putMeta !== 'function') {
-          throw new Error(
-            `Sync port for collection ${id} has no putMeta; the driver needs one`
-          )
-        }
+        })
         const wasPort =
           port.feedPrimaryRead === true
             ? withFeedPrimaryRead(basePort)

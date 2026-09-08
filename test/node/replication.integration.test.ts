@@ -99,8 +99,7 @@ async function openServerCollection(): Promise<{
     collectionId,
     encryption: 'plaintext'
   })
-  const build = () =>
-    createWasSyncPort({ was, spaceId, collectionId }) as WasSyncPort
+  const build = () => createWasSyncPort({ was, spaceId, collectionId })
   return { port: build(), observer: build() }
 }
 
@@ -386,7 +385,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       was,
       spaceId,
       collectionId: `synced-${collectionSerial}`
-    }) as WasSyncPort
+    })
     const deletes: string[] = []
     const rawDelete = portB.deleteContent.bind(portB)
     portB.deleteContent = async options => {

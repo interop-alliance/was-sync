@@ -29,6 +29,7 @@ import type {
   Json,
   MasterState as ClientPrimaryState,
   SyncCheckpoint as ClientSyncCheckpoint,
+  WireDoc as ClientWireDoc,
   WriteAck as ClientWriteAck
 } from '@interop/was-client/sync'
 
@@ -200,38 +201,12 @@ export type SyncCheckpoint = ClientSyncCheckpoint
  * string that embeds more than the revision number. `etag` and `metaEtag`
  * carry those opaque validators, quoted exactly as the server emits them, so a
  * puller can pass one back verbatim as a conditional write's `ifMatch` without
- * a separate {@link WasSyncPort.get}.
+ * a separate {@link WasSyncPort.get}. `epoch` is the opaque key-epoch id the
+ * content body was encrypted under, and `createdBy` the server-managed creator
+ * DID, both moved verbatim. was-client's own feed document type, aliased here
+ * so the driver and the port agree by construction.
  */
-export interface WireDoc {
-  id: string
-  _deleted: boolean
-  updatedAt: string
-  version: number
-  metaVersion?: number
-  data?: Json
-  custom?: Json
-  /**
-   * The opaque key-epoch id the content body was encrypted under (the
-   * `key-epochs` feature), present when the server holds a stamp for the
-   * resource. Moved verbatim; the sync layer never interprets it.
-   */
-  epoch?: string
-  /**
-   * The server-managed creator DID, carried verbatim on live documents and on
-   * tombstones alike, and absent when the server recorded no creator.
-   */
-  createdBy?: string
-  /**
-   * The content `ETag`, quoted, exactly as the server emits it. Echo it back
-   * verbatim as a later content write's `ifMatch`.
-   */
-  etag?: string
-  /**
-   * The `/meta` object's `ETag`, quoted, exactly as the server emits it. Echo
-   * it back verbatim as a later metadata write's `ifMatch`.
-   */
-  metaEtag?: string
-}
+export type WireDoc = ClientWireDoc
 
 /**
  * The local replica's document shape, shared across every synced collection.
