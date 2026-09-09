@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.54.0
-        version: 0.54.0(@interop/jsonld-signatures@11.8.5)
+        specifier: ^0.58.0
+        version: 0.58.0(@interop/jsonld-signatures@11.8.5)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -299,6 +299,10 @@ packages:
       react-native-get-random-values:
         optional: true
 
+  '@interop/capability-agent@0.1.1':
+    resolution: {integrity: sha512-1qGbdIhw/sLK65FCqr9blfJDVvW7uXsML6sRpiiledRBt/xhSskHBVQ4QzHYOvxDCYW6p1KPy/jPIGz6CqwIjA==}
+    engines: {node: '>=24.0'}
+
   '@interop/data-integrity-core@8.7.1':
     resolution: {integrity: sha512-KD/AFAfnsDVa7Kz3yzx0t/L1A+GlFI0RahbtXsfzcznRlN63fPZCJ6W3C+unPyksCYsILZIHcOFFJkZe6eKtkw==}
     engines: {node: '>=24.0'}
@@ -354,8 +358,8 @@ packages:
       react-native-get-random-values:
         optional: true
 
-  '@interop/edv-client@17.8.2':
-    resolution: {integrity: sha512-n5a68nUkHtPjOaqR7evIH+Nl9bgF+jkoN9MYPDw8+Hg2IJNKK6SOLZ93yf/LHdKaNBCFJodFZr0sudexaoq5Kg==}
+  '@interop/edv-client@17.8.3':
+    resolution: {integrity: sha512-ZFXa99CV3RpbUDyiALzMsAPML3+PIRZuD5STvUWwo3+tKn1s1lNGyDx0ff1t6ufcjslNp8paKZLd8hUx60GapQ==}
     engines: {node: '>=24.0'}
     peerDependencies:
       react-native-get-random-values: ^2.0.0
@@ -363,8 +367,8 @@ packages:
       react-native-get-random-values:
         optional: true
 
-  '@interop/ezcap@7.4.6':
-    resolution: {integrity: sha512-t5nVS2PA0cQYQGdG4R5feNoMJKlgdcLCTzFYMKHRx+Wp1dhjpCixj2E7nsjrfq3nh28+OS1bBJlFhYflm/qaww==}
+  '@interop/ezcap@7.4.7':
+    resolution: {integrity: sha512-l2UXWEwrajgAbXm5HnKXYQCkyBcJZ8Y9cw7trFuW5grFd2rJVRW8oNspQIbeq2hb7tNFtsqummu3NyyUUbPnZA==}
     engines: {node: '>=20.0'}
 
   '@interop/http-client@1.0.5':
@@ -412,6 +416,10 @@ packages:
     resolution: {integrity: sha512-p5Y7S7tt2qRhyXHtToQ/GTb4a/+vf0AGXX8N5h3978d1yyKb1wJ22sV6LFF8wMc7GQqCYqflLnI8aNubVAgV0g==}
     engines: {node: '>=24.0'}
 
+  '@interop/minimal-cipher@7.10.1':
+    resolution: {integrity: sha512-/qpVpUzJQXagW1KkgXxuHjO8Nvp1C74gs+peYuf0YDktXXH9Ydw5lJtwIWmP30e50K02RTKVGJCBTWQ0uHCkhw==}
+    engines: {node: '>=24.0'}
+
   '@interop/security-document-loader@10.1.1':
     resolution: {integrity: sha512-ATCJlFQEPMSBlt9epaou6fazhWqgFLIRF5YwjS1nHFJlTnxsloHNA+BlXyo1TvjxiIM+Pvw3mmVubzVOEmF5fA==}
     engines: {node: '>=24.0'}
@@ -424,6 +432,10 @@ packages:
     resolution: {integrity: sha512-Kh9iyeUZXq6bY4rQdLrapOlab3gY8gH8YTMqam/IKfyJqaLe9NpE+ha/p5oDpwjnv5XPF4F6itIlu/GQu/wprw==}
     engines: {node: '>=22.0'}
 
+  '@interop/storage-core@0.13.0':
+    resolution: {integrity: sha512-LrH09nIaLjz+Y4inQO6fgA6cSuv1CypX8p/bNRFKC0EpG36Cp2A24abEmV4jL+HW4Vi4cD0Q3yOaH7WViBkJwg==}
+    engines: {node: '>=22.0'}
+
   '@interop/storage-core@0.9.1':
     resolution: {integrity: sha512-YF+qMjuBn+ehqqY+dKNRF6k34f0uvWh+ojzg+mC71TPtJ6B/7+Qjm8MTYPFRfoW8wekEoSB525a1uto+mMfoKQ==}
     engines: {node: '>=22.0'}
@@ -432,16 +444,24 @@ packages:
     resolution: {integrity: sha512-lI2pLNU3Kxm8o1Y7trKBJLi8tCvpr83gMpVkhUq0RIclNtL7fQAxsI1a6zCuFY6qtGZfgwdBJK+Zzsbz3ASxxw==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.54.0':
-    resolution: {integrity: sha512-tjBkxqIWoLYmTBxDULRHjZIr6nSAe3GunZoFjw9GCd0S5/Wx4mQOkFOiVkpYKjxH36MVvWZ8bARTz6Qi00POeQ==}
+  '@interop/was-client@0.58.0':
+    resolution: {integrity: sha512-ahrZQwrPJMQQlXkrUppYCTqeJxgWE+pTJev6AmKQ74ka2XXQseg5n3hcS2BLYsuHCVnTiV4ChRItcSvOTFe0Hw==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.3.0':
     resolution: {integrity: sha512-c/DXLw0kBGICScAw/5Pk6rn9dzjk9tl6Jl9f6yoOle5I7+8998TqaDkVQkMO0TsEf2/XAPcu61VThnJCC++zFQ==}
     engines: {node: '>=24.0'}
 
+  '@interop/x25519-key-agreement-key@5.4.0':
+    resolution: {integrity: sha512-67xKx0LF1F6iQK8GQzk//XDdWB4cd2FUZtRqKWfMZih5ufMWG51Y/UYPhgEwOVmpbhE62NgS8SeE1SEa7Cgsdg==}
+    engines: {node: '>=24.0'}
+
   '@interop/zcap@11.1.0':
     resolution: {integrity: sha512-Y0C6RqHnR5fhgXGr0qBWsTfIYBKp+5yMWS3sUdF759IFPJQQslWHo5RwZOiqmhtY4q6PSAmnoQbCed9G1cPkqQ==}
+    engines: {node: '>=24.0'}
+
+  '@interop/zcap@11.2.0':
+    resolution: {integrity: sha512-L/+ceE4XynFm6636ikD+MIgGp48FIcM+pZGPq46/nbWuzSh+7ekGqM7sHqnujw/+LmMfzo5eriad3X/eqSDnlQ==}
     engines: {node: '>=24.0'}
 
   '@isaacs/ttlcache@1.4.1':
@@ -1173,8 +1193,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  electron-to-chromium@1.5.422:
-    resolution: {integrity: sha512-UvA/32XqrLDdZSn7Jllo1AYNcWji/G0d5M0GTViE7KoGBiMunw3a34Sb2KO4ZZyrSEhqsxFoVhWWJshdyfKqJA==}
+  electron-to-chromium@1.5.424:
+    resolution: {integrity: sha512-rTOe76LHREmnLOWc0NlakB7AlnWjhTNflk4YE3gnIBPbSXLiY+VDEgwYl4wAYdBPD7eq9NQq6TR8lvd9Fls2CA==}
 
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
@@ -1500,8 +1520,8 @@ packages:
     resolution: {integrity: sha512-hsBTNUqQTDwkWtcdYI2i06Y/nUBEsNEDJKjWdigLvegy8kDuJAS8uRlpkkcQpyEXL0Z/pjDy5HBmMjRCJ2gq+g==}
     engines: {node: '>= 4'}
 
-  ignore@7.0.8:
-    resolution: {integrity: sha512-YYNsSlXBjMk92SKnkwvB5LOVSa6OznlFUGcsvrFgNJbJCd0M1XKeFVRc8ZByeCqz32FivYNHJVooLmdqrmvp/Q==}
+  ignore@7.0.9:
+    resolution: {integrity: sha512-brTTsvFRt5C1gGHtPst/281UjPD5t9fBqbgoMPlVWy11ZLTPfu7HxK4ZYqO9H7o/yC9rSTCI85EaQ4OoY12qYw==}
     engines: {node: '>= 4'}
 
   image-size@1.2.1:
@@ -2995,6 +3015,13 @@ snapshots:
     dependencies:
       '@scure/base': 2.4.0
 
+  '@interop/capability-agent@0.1.1':
+    dependencies:
+      '@interop/data-integrity-core': 8.7.1
+      '@interop/ed25519-verification-key': 8.1.0
+    transitivePeerDependencies:
+      - react-native-get-random-values
+
   '@interop/data-integrity-core@8.7.1':
     dependencies:
       '@scure/base': 2.4.0
@@ -3073,13 +3100,13 @@ snapshots:
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
 
-  '@interop/edv-client@17.8.2':
+  '@interop/edv-client@17.8.3':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
       '@interop/http-client': 1.0.5
       '@interop/http-signature-zcap-invoke': 6.2.6
       '@interop/lru-memoize': 4.0.3
-      '@interop/minimal-cipher': 7.10.0
+      '@interop/minimal-cipher': 7.10.1
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
       canonicalize: 3.0.0
@@ -3087,7 +3114,7 @@ snapshots:
     transitivePeerDependencies:
       - expo-crypto
 
-  '@interop/ezcap@7.4.6':
+  '@interop/ezcap@7.4.7':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
       '@interop/data-integrity-proof': 3.4.5
@@ -3095,7 +3122,7 @@ snapshots:
       '@interop/http-client': 1.0.5
       '@interop/http-signature-zcap-invoke': 6.2.6
       '@interop/jsonld-signatures': 11.8.5
-      '@interop/zcap': 11.1.0
+      '@interop/zcap': 11.2.0
     transitivePeerDependencies:
       - expo-crypto
 
@@ -3157,6 +3184,16 @@ snapshots:
       '@stablelib/chacha': 2.0.1
       '@stablelib/chacha20poly1305': 2.0.1
 
+  '@interop/minimal-cipher@7.10.1':
+    dependencies:
+      '@interop/data-integrity-core': 8.7.1
+      '@interop/ecdsa-multikey': 2.4.0
+      '@noble/ciphers': 2.4.0
+      '@noble/curves': 2.4.0
+      '@scure/base': 2.4.0
+      '@stablelib/chacha': 2.0.1
+      '@stablelib/chacha20poly1305': 2.0.1
+
   '@interop/security-document-loader@10.1.1':
     dependencies:
       '@digitalbazaar/data-integrity-context': 2.0.1
@@ -3190,6 +3227,10 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.7.1
 
+  '@interop/storage-core@0.13.0':
+    dependencies:
+      '@interop/data-integrity-core': 8.7.1
+
   '@interop/storage-core@0.9.1':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
@@ -3199,17 +3240,18 @@ snapshots:
       '@interop/did-method-webvh': 5.8.0
       '@interop/storage-core': 0.9.1
 
-  '@interop/was-client@0.54.0(@interop/jsonld-signatures@11.8.5)':
+  '@interop/was-client@0.58.0(@interop/jsonld-signatures@11.8.5)':
     dependencies:
+      '@interop/capability-agent': 0.1.1
       '@interop/data-integrity-core': 8.7.1
       '@interop/ed25519-signature': 7.2.1(@interop/jsonld-signatures@11.8.5)
-      '@interop/edv-client': 17.8.2
-      '@interop/ezcap': 7.4.6
+      '@interop/edv-client': 17.8.3
+      '@interop/ezcap': 7.4.7
       '@interop/http-client': 1.0.5
-      '@interop/minimal-cipher': 7.10.0
-      '@interop/storage-core': 0.11.0
+      '@interop/minimal-cipher': 7.10.1
+      '@interop/storage-core': 0.13.0
       '@interop/vh-resource-log': 0.5.0
-      '@interop/x25519-key-agreement-key': 5.3.0
+      '@interop/x25519-key-agreement-key': 5.4.0
       '@noble/hashes': 2.4.0
       '@scure/base': 2.4.0
       json-canonicalize: 3.0.0
@@ -3224,7 +3266,19 @@ snapshots:
       '@noble/curves': 2.4.0
       '@scure/base': 2.4.0
 
+  '@interop/x25519-key-agreement-key@5.4.0':
+    dependencies:
+      '@interop/data-integrity-core': 8.7.1
+      '@noble/curves': 2.4.0
+      '@scure/base': 2.4.0
+
   '@interop/zcap@11.1.0':
+    dependencies:
+      '@digitalbazaar/zcap-context': 2.0.1
+      '@interop/data-integrity-core': 8.7.1
+      '@interop/jsonld-signatures': 11.8.5
+
+  '@interop/zcap@11.2.0':
     dependencies:
       '@digitalbazaar/zcap-context': 2.0.1
       '@interop/data-integrity-core': 8.7.1
@@ -3500,7 +3554,7 @@ snapshots:
       '@typescript-eslint/utils': 8.70.0(eslint@10.10.0)(typescript@6.0.3)
       '@typescript-eslint/visitor-keys': 8.70.0
       eslint: 10.10.0
-      ignore: 7.0.8
+      ignore: 7.0.9
       natural-compare: 1.4.0
       ts-api-utils: 2.5.0(typescript@6.0.3)
       typescript: 6.0.3
@@ -3767,7 +3821,7 @@ snapshots:
     dependencies:
       baseline-browser-mapping: 2.11.21
       caniuse-lite: 1.0.30001810
-      electron-to-chromium: 1.5.422
+      electron-to-chromium: 1.5.424
       node-releases: 2.0.54
       update-browserslist-db: 1.3.2(browserslist@4.28.9)
 
@@ -3917,7 +3971,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  electron-to-chromium@1.5.422: {}
+  electron-to-chromium@1.5.424: {}
 
   emoji-regex@8.0.0: {}
 
@@ -4258,7 +4312,7 @@ snapshots:
 
   ignore@5.3.2: {}
 
-  ignore@7.0.8: {}
+  ignore@7.0.9: {}
 
   image-size@1.2.1:
     dependencies:
