@@ -175,6 +175,16 @@ function recordPreconditionsOn(port: WasSyncPort): {
 }
 
 /**
+ * Whether the observer's read shows a fully committed record. The server writes
+ * a resource's content file before its metadata sidecar, and a read that lands
+ * between the two returns the content with no `etag`, `version`, or
+ * `createdBy`; waiting for the `etag` rules that torn read out.
+ */
+function committed(record: { etag?: string } | null): boolean {
+  return record?.etag !== undefined
+}
+
+/**
  * Waits until `predicate` holds, nudging replication and polling. Avoids
  * depending on exact RxDB cycle timing.
  */
@@ -210,7 +220,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       data: { hello: 'world' }
     })
 
-    await eventually(async () => (await observer.get({ id: 'cid-1' })) !== null)
+    await eventually(async () => committed(await observer.get({ id: 'cid-1' })))
     const primary = await observer.get({ id: 'cid-1' })
     expect(primary?.data).toEqual({ hello: 'world' })
     expect(primary?.version).toBeGreaterThanOrEqual(1)
@@ -327,7 +337,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       async () => {
         const current = await collection.findOne('cid-del').exec()
         return (
-          (await observer.get({ id: 'cid-del' })) !== null &&
+          committed(await observer.get({ id: 'cid-del' })) &&
           (current?.toJSON().version ?? 0) >= 1
         )
       },
@@ -372,7 +382,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       data: { x: 1 }
     })
     await eventually(
-      async () => (await observer.get({ id: 'cid-shared' })) !== null,
+      async () => committed(await observer.get({ id: 'cid-shared' })),
       () => replicationA.reSync()
     )
     const live = await observer.get({ id: 'cid-shared' })
@@ -514,8 +524,8 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       version: 0,
       data: { hello: 'world' }
     })
-    await eventually(
-      async () => (await observer.get({ id: 'cid-author' })) !== null
+    await eventually(async () =>
+      committed(await observer.get({ id: 'cid-author' }))
     )
 
     const primary = await observer.get({ id: 'cid-author' })
