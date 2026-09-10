@@ -1,7 +1,7 @@
 {
   "name": "@interop/was-sync",
   "description": "The WAS replication driver for RxDB: the changes-feed pull handler, the conditional-write push handler, the conflict-handler seam, the synced-document schema, and the session controller core.",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "scripts": {
     "build": "pnpm run clear && tsc",
