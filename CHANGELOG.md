@@ -1,5 +1,11 @@
 # @interop/was-sync Changelog
 
+## 0.2.8 - TBD
+
+### Changed
+
+- Update to latest ed25519 key dep.
+
 ## 0.2.7 - 2026-09-10
 
 ### Changed
