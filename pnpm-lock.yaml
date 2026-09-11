@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.59.1
-        version: 0.59.1(@interop/jsonld-signatures@11.8.5)
+        specifier: ^0.60.0
+        version: 0.60.0(@interop/jsonld-signatures@11.8.5)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -462,8 +462,8 @@ packages:
     resolution: {integrity: sha512-jlQ6Oq+3vdUQOtz2FEYu3B3KXAw41yYTUKkg2lkkFt3qvuT+Y/Dn3n59TJqUvj0OH9nbkV+YjuHINIDGMjrHng==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.59.1':
-    resolution: {integrity: sha512-H3GfqdX7V6gMe2OC8V8fnpkGbFBeEnQde+VrLLZcnXAekQJP4GRNU9k+1qZi1+/hSHVPSj2NMkpcTRG3hNJJDA==}
+  '@interop/was-client@0.60.0':
+    resolution: {integrity: sha512-E409PI17NZE6NarxH4GJ1Npe7kuFTdRTMi8Y1qN6P6pgwh/Gwz/8Yc/JOgz/VwE3P/K0ecEFrSWH2By0Rn2jcQ==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.3.0':
@@ -3283,7 +3283,7 @@ snapshots:
       '@interop/did-method-webvh': 5.9.0
       '@interop/storage-core': 0.13.0
 
-  '@interop/was-client@0.59.1(@interop/jsonld-signatures@11.8.5)':
+  '@interop/was-client@0.60.0(@interop/jsonld-signatures@11.8.5)':
     dependencies:
       '@interop/capability-agent': 0.2.0
       '@interop/data-integrity-core': 8.7.1

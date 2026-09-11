@@ -1,5 +1,13 @@
 # @interop/was-sync Changelog
 
+## 0.2.9 - TBD
+
+### Changed
+
+- Widen the `@interop/was-client` peer range to `>=0.59.1 <1.0.0`, so a
+  was-client minor release no longer needs a was-sync republish. The lower bound
+  moves when the driver starts using a newer was-client API.
+
 ## 0.2.8 - 2026-09-10
 
 ### Changed
