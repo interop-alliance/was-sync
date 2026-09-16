@@ -30,11 +30,25 @@
  * (`isUnknownEpochError` / `isKeyUnwrapError`, matched by `err.name`), so a
  * reader can tell a spent refresh from a key this reader was never given.
  *
+ * A missing key is not the only way a decrypt can fail. was-client's ciphers
+ * bind an envelope to the resource id it was written for and raise
+ * `IntegrityError` when a body is read under a different id. That is a tampered
+ * or misfiled envelope rather than a key this reader lacks, so it is not scored
+ * `undecryptable`: it propagates out of the resolver and fails the replication
+ * cycle. Addressing the right id is why the resolver hands each side's own
+ * `SyncedDoc.id` to the closure rather than any id read out of a decrypted
+ * body.
+ *
  * `isEqual` stays cheap and synchronous, as RxDB requires: a structural compare
  * of the opaque bodies plus the server revisions.
  */
 import { remotePayloadWins } from '@interop/social-core'
-import { isKeyUnwrapError, isUnknownEpochError } from '@interop/was-client/sync'
+import {
+  isIntegrityError,
+  isKeyUnwrapError,
+  isUnknownEpochError,
+  type DocCipher
+} from '@interop/was-client/sync'
 import { bodiesEqual, lwwFields } from './types.js'
 import type { Json, LwwFields, SyncedDoc, WithDeleted } from './types.js'
 import { log } from './log.js'
@@ -148,7 +162,8 @@ export function makeConflictHandler({
  * unseen key epoch, say). `none` and `undecryptable` are deliberately distinct:
  * the former means "nothing there to compare", the latter means "something is
  * there that this client cannot read", and scoring the two the same silently
- * loses writes.
+ * loses writes. An integrity failure is in neither bucket: it leaves
+ * {@link lwwFieldsOf} as a thrown error.
  */
 type LwwSide =
   | { kind: 'payload'; payload: LwwFields }
@@ -156,27 +171,68 @@ type LwwSide =
   | { kind: 'undecryptable'; err: unknown }
 
 /**
- * Decrypts one side's envelope into its LWW comparability (see LwwSide). A
- * payload carrying no LWW stamp reads as `none`, the same as a tombstone or an
- * absent body: nothing there to compare.
+ * The decrypt closure the default resolver settles a conflict with:
+ * was-client's own `DocCipher.decrypt`, aliased here so the resolver and
+ * whatever cipher a consumer wires agree by construction.
+ *
+ * The `id` the closure is called with is the addressed WAS resourceId, and it
+ * is the ROW's own (`SyncedDoc.id`). An id read out of the decrypted body
+ * would check the envelope against itself and prove nothing, which is the
+ * check's whole point.
+ */
+export type ConflictDecrypt = DocCipher['decrypt']
+
+/**
+ * Decrypts one side's envelope into its LWW comparability (see LwwSide),
+ * addressing the row by its own id. A payload carrying no LWW stamp reads as
+ * `none`, the same as a tombstone or an absent body: nothing there to compare.
+ *
+ * An integrity failure is rethrown rather than scored `undecryptable`. A body
+ * written for a different resource than the one it was read under is not an
+ * absent key, and rule 3 in {@link lwwResolver} would adopt or re-assert it
+ * with nothing louder than a `warn`. Rethrowing hands it to
+ * {@link makeConflictHandler}'s throw contract instead -- logged at `error`,
+ * fatal to the replication cycle -- which is how this module already treats a
+ * decision it cannot make soundly.
+ *
+ * A `Blob` does not arise here. was-client resolves one only for a chunked
+ * envelope, and only when the caller supplies the `context` that reads the
+ * chunks; this resolver supplies none, so a chunked side raises instead. A
+ * closure that returns one anyway is scored `undecryptable` rather than `none`,
+ * since a body whose LWW stamp cannot be read is something this client cannot
+ * compare rather than nothing to compare.
  *
  * @param doc {WithDeleted<SyncedDoc>}
- * @param decrypt {(envelope: Json) => Promise<Json>}
+ * @param decrypt {ConflictDecrypt}
  * @returns {Promise<LwwSide>}
  */
 async function lwwFieldsOf(
   doc: WithDeleted<SyncedDoc>,
-  decrypt: (envelope: Json) => Promise<Json>
+  decrypt: ConflictDecrypt
 ): Promise<LwwSide> {
   if (doc._deleted || doc.data === undefined) {
     return { kind: 'none' }
   }
+  let plaintext: Json | Blob
   try {
-    const payload = lwwFields(await decrypt(doc.data))
-    return payload === null ? { kind: 'none' } : { kind: 'payload', payload }
+    plaintext = await decrypt({ id: doc.id, envelope: doc.data })
   } catch (err) {
+    if (isIntegrityError(err)) {
+      throw err
+    }
     return { kind: 'undecryptable', err }
   }
+  if (plaintext instanceof Blob) {
+    return {
+      kind: 'undecryptable',
+      err: new Error(
+        'The decrypt closure resolved a Blob; a chunked body carries no ' +
+          'last-write-wins stamp to compare.'
+      )
+    }
+  }
+  const payload = lwwFields(plaintext)
+  return payload === null ? { kind: 'none' } : { kind: 'payload', payload }
 }
 
 /**
@@ -234,7 +290,9 @@ function undecryptableReason(
  *    re-asserted (the user's edit is not silently dropped); both undecryptable
  *    adopts the remote (deterministic and convergent). Each case is logged at
  *    `warn` -- distinguishable from the intended tombstone/absent-body `none`
- *    the remaining rules were written for.
+ *    the remaining rules were written for. An integrity failure never reaches
+ *    this rule: {@link lwwFieldsOf} rethrows it, so a tampered envelope fails
+ *    the cycle rather than being presumed newer.
  * 4. Both sides carry an LWW payload: pure payload LWW via `payloadWins`.
  * 5. A live local edit against an incomparable remote (a remote tombstone, say):
  *    the edit wins and is re-pushed (resurrection).
@@ -243,11 +301,12 @@ function undecryptableReason(
  *    makes the delete-vs-concurrent-edit rule "the edit wins" on every replica.
  *
  * @param options {object}
- * @param options.decrypt {(envelope: Json) => Promise<Json>}   this
- *   collection's decrypt, read lazily by the caller so a cipher swap is
- *   honored; on an encrypted collection, a refreshing cipher's
- *   (`createRefreshingEdvDocCipher` in `@interop/was-client/edv`), so an
- *   unseen-epoch side is re-read once before it counts as undecryptable
+ * @param options.decrypt {ConflictDecrypt}   this collection's decrypt, read
+ *   lazily by the caller so a cipher swap is honored; on an encrypted
+ *   collection, a refreshing cipher's (`createRefreshingEdvDocCipher` in
+ *   `@interop/was-client/edv`), so an unseen-epoch side is re-read once before
+ *   it counts as undecryptable. Called with the row's own id, and with no
+ *   `context`
  * @param [options.payloadWins] {(remote: LwwFields, local: LwwFields) => boolean}
  *   the total-order comparator; defaults to social-core's `remotePayloadWins`
  *   (later `updatedAt` wins, `writerId` breaks a tie)
@@ -257,7 +316,7 @@ export function lwwResolver({
   decrypt,
   payloadWins = remotePayloadWins
 }: {
-  decrypt: (envelope: Json) => Promise<Json>
+  decrypt: ConflictDecrypt
   payloadWins?: (remote: LwwFields, local: LwwFields) => boolean
 }): (input: ConflictInput) => Promise<ConflictWinner> {
   return async function resolve({
@@ -346,12 +405,12 @@ export function lwwResolver({
  * {@link lwwResolver}. Kept as a named convenience because it is the shape
  * consumers already attach at `addCollections`.
  *
- * @param decrypt {(envelope: Json) => Promise<Json>}   this collection's decrypt
+ * @param decrypt {ConflictDecrypt}   this collection's decrypt
  * @param [payloadWins] {(remote: LwwFields, local: LwwFields) => boolean}
  * @returns {ConflictHandler}
  */
 export function makeLwwConflictHandler(
-  decrypt: (envelope: Json) => Promise<Json>,
+  decrypt: ConflictDecrypt,
   payloadWins: (
     remote: LwwFields,
     local: LwwFields

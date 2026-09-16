@@ -221,6 +221,22 @@ numbered so items and reviews can cite them.
     DELETE, never assigning `createdBy`, and raising error shapes the default
     port does not.
 
+16. **A decrypt failure is either a missing key or a fatal one.** The closure is
+    was-client's `DocCipher.decrypt` (aliased as `ConflictDecrypt`), called with
+    each side's own `SyncedDoc.id` as the addressed resource and with no codec
+    context. was-client's ciphers bind an envelope to the id it was written for,
+    so the addressed id has to be the row's; an id read back out of a decrypted
+    body would check the envelope against itself. A no-key failure
+    (`UnknownEpochError` / `KeyUnwrapError`) is scored `undecryptable` and
+    presumed newer, per invariant 3. An `IntegrityError` is not: a body written
+    for another resource is not an absent key, and presuming it newer would
+    adopt or re-assert a tampered envelope with nothing louder than a `warn`, so
+    it propagates out of the resolver and fails the replication cycle (invariant
+    13's throw contract). A `Blob` does not arise: was-client resolves one only
+    for a chunked envelope read with the context that fetches the chunks, which
+    this resolver never supplies, and a closure that returns one anyway is
+    scored `undecryptable` rather than `none` so the write is not silently lost.
+
 ## Ownership heuristics
 
 - **A WAS request, an error class, or a wire name** belongs to
@@ -293,6 +309,16 @@ the byoe-ecosystem layer map instead.
 - **Key epoch** -- the opaque id of the key a stored envelope was encrypted
   under, carried verbatim on `SyncedDoc.epoch` and stamped on the content push.
   The driver never interprets it. Avoid: key version, epoch key.
+- **Conflict decrypt** -- the closure the default resolver opens both sides of a
+  mutable-head conflict with (`ConflictDecrypt`, was-client's
+  `DocCipher.decrypt`). It is the only seam in the driver that reads a body, and
+  it is called with the row's own id and no codec context. Avoid: cipher,
+  decryptor, unseal.
+- **Undecryptable side** -- a conflict side whose body is there but unreadable
+  on this client, as distinct from an absent one (`none`). Scored apart because
+  an unreadable body is presumed newer rather than lost. An integrity failure is
+  in neither bucket: it throws. Avoid: unreadable side, sealed side, opaque
+  side.
 
 ## Current State labels
 

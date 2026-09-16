@@ -57,7 +57,7 @@
     "@eslint/js": "^10.0.1",
     "@interop/ed25519-verification-key": "^8.2.0",
     "@interop/logger": "^0.2.0",
-    "@interop/was-client": "^0.60.0",
+    "@interop/was-client": "^0.66.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "^26.0.1",
     "@vitest/coverage-v8": "^4.1.7",
@@ -71,7 +71,16 @@
     "typescript-eslint": "^8.59.4",
     "vite": "^8.0.14",
     "vitest": "^4.1.7",
-    "was-teaching-server": "^0.29.0"
+    "was-teaching-server": "^0.35.1"
+  },
+  "peerDependencies": {
+    "@interop/was-client": ">=0.66.0 <1.0.0",
+    "rxdb": "^17.0.0"
+  },
+  "peerDependenciesMeta": {
+    "rxdb": {
+      "optional": true
+    }
   },
   "publishConfig": {
     "access": "public",
@@ -99,14 +108,5 @@
     "url": "git+https://github.com/interop-alliance/was-sync.git"
   },
   "homepage": "https://github.com/interop-alliance/was-sync",
-  "bugs": "https://github.com/interop-alliance/was-sync/issues",
-  "peerDependencies": {
-    "@interop/was-client": ">=0.59.1 <1.0.0",
-    "rxdb": "^17.0.0"
-  },
-  "peerDependenciesMeta": {
-    "rxdb": {
-      "optional": true
-    }
-  }
+  "bugs": "https://github.com/interop-alliance/was-sync/issues"
 }

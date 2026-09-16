@@ -41,6 +41,7 @@ export {
   makeConflictHandler,
   makeLwwConflictHandler,
   statesEqual,
+  type ConflictDecrypt,
   type ConflictHandler,
   type ConflictInput,
   type ConflictWinner

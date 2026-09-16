@@ -117,7 +117,7 @@ async function openCollection({
     storage: getRxStorageMemory(),
     multiInstance: false
   })
-  const resolve = lwwResolver({ decrypt: async envelope => envelope })
+  const resolve = lwwResolver({ decrypt: async ({ envelope }) => envelope })
   const { synced } = await db.addCollections({
     synced: {
       schema: syncedDocSchema(),

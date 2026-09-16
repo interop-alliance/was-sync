@@ -1,5 +1,32 @@
 # @interop/was-sync Changelog
 
+## 0.3.0 - TBD
+
+### Changed
+
+- BREAKING: the conflict resolver's `decrypt` closure is now was-client's
+  `DocCipher.decrypt`, exported as the `ConflictDecrypt` type:
+  `({ id, envelope, context? }) => Promise<Json | Blob>`, where it used to be
+  `(envelope) => Promise<Json>`. `lwwResolver` and `makeLwwConflictHandler` take
+  the new shape. Each side is decrypted under the row's own `SyncedDoc.id`, so
+  the cipher's check that an envelope was written for the resource it is read
+  under is no longer skipped.
+- BREAKING: an `IntegrityError` from the closure propagates out of the resolver
+  and fails the replication cycle instead of being scored `undecryptable`. A
+  body written for another resource is not an absent key, and the undecryptable
+  rules would otherwise adopt or re-assert it with only a `warn`.
+  `UnknownEpochError` and `KeyUnwrapError` are unaffected.
+- A closure that resolves a `Blob` is scored `undecryptable` rather than absent,
+  so the write is not silently lost. It does not arise through was-client's own
+  ciphers: the resolver supplies no codec context, which a chunked envelope
+  needs to resolve one.
+- Raise the `@interop/was-client` peer range to `>=0.66.0 <1.0.0`. A build
+  calling `decrypt(envelope)` next to was-client 0.66.0 passes no id, which
+  skips the binding check and makes the plaintext cipher throw on every read.
+- Update the `was-teaching-server` devDependency to `^0.35.1`. was-client 0.62.0
+  made service discovery mandatory, and the integration suite's pinned server
+  predates WAS v0.5.
+
 ## 0.2.9 - 2026-09-11
 
 ### Changed

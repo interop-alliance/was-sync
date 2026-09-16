@@ -99,7 +99,7 @@ extension even though source files are `.ts` — e.g.
 The current shape of the library lives in [ARCHITECTURE.md](./ARCHITECTURE.md),
 rationale inline, updated in the same change set that alters the shape. It is
 load-bearing for the conventions below: the design gate scopes on the invariants
-it documents, `touches:` entries name it as a deliverable, and the
+it documents, `touches:` entries name it so the follow-up gets filed, and the
 breaking-release audit checks it against the code.
 
 ### Domain language
@@ -153,10 +153,12 @@ Each work item follows this schema:
   gain acceptance criteria when promoted to `todo`.
 - `touches:` is required for any item that changes a spec, a wire contract, or a
   shared `@interop/*` API. It lists every affected repo AND that repo's
-  ARCHITECTURE/AGENTS files -- the docs are entries in their own right, not an
-  afterthought, since doc drift is what the field exists to prevent. Each entry
-  starts unresolved and is resolved in place: marked shipped (naming what
-  landed) or explicitly waived as `unaffected: <repo> (<why>)`.
+  ARCHITECTURE/AGENTS files, since doc drift is what the field exists to
+  prevent. Each entry is a reminder to file follow-up work in that repo, not a
+  deliverable of this item. Before the item goes `done`, each entry is annotated
+  in place with the follow-up item filed there (`<repo>: <PREFIX>-N`), with what
+  already shipped there, or with `unaffected: <repo> (<why>)`. The follow-up
+  items carry the cross-repo work on their own schedule.
 
 Rules:
 
@@ -166,9 +168,9 @@ Rules:
   `in-progress`.
 - Statuses are edited in place (change the `status:` field); acceptance
   checkboxes are ticked as they are met.
-- An item carrying a `touches:` field may not flip to `done` while any entry in
-  it is unresolved -- an unresolved entry is unfinished work of the item itself,
-  not a follow-up.
+- A `touches:` entry does not block `done`. An item is done when its own repo's
+  work is done and every entry carries its annotation, so the cross-repo
+  follow-ups are on record in their own roadmaps.
 - Completed items move **verbatim** (number, title, field block, prose, with
   their `done` date) from ROADMAP.md to
   [archived-roadmap.md](./archived-roadmap.md) once shipped, append-only -- this

@@ -9,25 +9,46 @@ import { setLogger } from '../../src/log.js'
 import {
   lwwResolver,
   makeConflictHandler,
-  makeLwwConflictHandler
+  makeLwwConflictHandler,
+  type ConflictDecrypt
 } from '../../src/conflictHandler.js'
 
-// The marker body an "unreadable" envelope carries: the epoch-aware fake cipher
-// below throws for it, standing in for an envelope written under a key epoch
-// this client has not seen.
+// The marker bodies an envelope this client cannot open carries. The fake
+// cipher below throws a differently-named error for each, standing in for
+// was-client's three decrypt failures: a key epoch this client has not seen, a
+// key this client was never a recipient of, and an envelope written for a
+// different resource than the one it is being read under.
 const SEALED = 'sealed-under-an-unseen-epoch'
+const UNWRAPPABLE = 'sealed-for-another-recipient'
+const TAMPERED = 'written-for-another-resource'
 
-// A fake cipher whose "envelope" is just the plaintext payload wrapped in
-// `{ jwe: payload }`; decrypt unwraps it. Lets us drive the handler's LWW
-// decision without real crypto.
-const decrypt = async (envelope: Json): Promise<Json> => {
+// Every `{ id, envelope }` the fake cipher was called with, so a test can
+// assert the resolver addresses each side by the ROW's id.
+const decryptCalls: { id: string; envelope: Json; context?: unknown }[] = []
+
+/**
+ * A fake cipher whose "envelope" is just the plaintext payload wrapped in
+ * `{ jwe: payload }`; decrypt unwraps it. Lets us drive the handler's LWW
+ * decision without real crypto. The thrown errors are shaped like the real
+ * was-client classes (matched by `err.name`, the cross-package rule): the
+ * decrypt THROWS rather than returning a payload with no LWW stamp.
+ */
+const decrypt: ConflictDecrypt = async ({ id, envelope, context }) => {
+  decryptCalls.push({ id, envelope, context })
   const { jwe } = envelope as { jwe: Json }
   if (jwe === SEALED) {
-    // Shaped like the real UnknownEpochError (matched by `err.name`, the
-    // cross-package rule): the decrypt THROWS rather than returning a payload
-    // with no LWW stamp.
     const err = new Error('Unknown key epoch "e9".')
     err.name = 'UnknownEpochError'
+    throw err
+  }
+  if (jwe === UNWRAPPABLE) {
+    const err = new Error('Could not unwrap the content encryption key.')
+    err.name = 'KeyUnwrapError'
+    throw err
+  }
+  if (jwe === TAMPERED) {
+    const err = new Error(`Envelope was not written for resource "${id}".`)
+    err.name = 'IntegrityError'
     throw err
   }
   return jwe
@@ -39,16 +60,18 @@ function row(
     deleted = false,
     version = 0,
     metaVersion,
-    custom
+    custom,
+    id = 'r1'
   }: {
     deleted?: boolean
     version?: number
     metaVersion?: number
     custom?: Json
+    id?: string
   } = {}
 ): WithDeleted<SyncedDoc> {
   const doc: WithDeleted<SyncedDoc> = {
-    id: 'r1',
+    id,
     updatedAt: '2026-01-01T00:00:00Z',
     version,
     _deleted: deleted
@@ -66,17 +89,25 @@ function row(
 }
 
 /**
- * A live row whose body does not decrypt on this client (an envelope under an
- * unseen key epoch), as distinct from a tombstone or a body with no LWW stamp.
+ * A live row carrying one of the marker bodies above, as distinct from a
+ * tombstone or a body with no LWW stamp.
  */
-function sealedRow(version = 0): WithDeleted<SyncedDoc> {
+function markerRow(marker: string, version = 0): WithDeleted<SyncedDoc> {
   return {
     id: 'r1',
     updatedAt: '2026-01-01T00:00:00Z',
     version,
     _deleted: false,
-    data: { jwe: SEALED } as unknown as Json
+    data: { jwe: marker } as unknown as Json
   }
+}
+
+/**
+ * A live row whose body does not decrypt on this client (an envelope under an
+ * unseen key epoch).
+ */
+function sealedRow(version = 0): WithDeleted<SyncedDoc> {
+  return markerRow(SEALED, version)
 }
 
 const handler = makeLwwConflictHandler(decrypt)
@@ -92,6 +123,7 @@ let capture = captureLogger('sync')
 beforeEach(() => {
   capture = captureLogger('sync')
   setLogger(capture.logger)
+  decryptCalls.length = 0
 })
 
 function logged(level: 'warn' | 'error') {
@@ -466,6 +498,98 @@ describe('makeConflictHandler', () => {
         isEqual: () => true
       }).isEqual(equal, echo)
     ).toBe(true)
+  })
+})
+
+describe('lwwResolver decrypt addressing and integrity', () => {
+  it("addresses each side by the row's own id, not the body's", async () => {
+    // The cipher checks the envelope against the id it is read under, so the
+    // addressed id has to come from the ROW. An id read back out of the
+    // decrypted body would check the envelope against itself.
+    const resolve = lwwResolver({ decrypt })
+    // A stale id inside each payload: it must never be the one addressed.
+    const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
+    primary.data = { jwe: { updatedAt: 'T2', writerId: 'dB', id: 'not-this' } }
+    const local = row({ updatedAt: 'T1', writerId: 'dA' })
+    local.data = { jwe: { updatedAt: 'T1', writerId: 'dA', id: 'not-this' } }
+
+    await resolve({ realMasterState: primary, newDocumentState: local })
+
+    expect(decryptCalls).toHaveLength(2)
+    expect(decryptCalls.map(call => call.id)).toEqual(['r1', 'r1'])
+    // was-client resolves a Blob only for a chunked envelope read WITH the
+    // context that fetches the chunks, so passing none is what keeps a body
+    // the LWW rules cannot compare out of reach.
+    expect(decryptCalls.map(call => call.context)).toEqual([
+      undefined,
+      undefined
+    ])
+  })
+
+  it('throws on an integrity failure rather than picking a winner', async () => {
+    // A body written for a different resource is not an absent key. Scoring it
+    // `undecryptable` would adopt or re-assert a tampered envelope with
+    // nothing louder than a warn, so it leaves the resolver as a throw.
+    const resolve = lwwResolver({ decrypt })
+    await expect(
+      resolve({
+        realMasterState: markerRow(TAMPERED, 2),
+        newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
+      })
+    ).rejects.toThrow(/was not written for resource/)
+    expect(logged('warn')).toHaveLength(0)
+  })
+
+  it('fails the replication cycle on an integrity failure, logged at error', async () => {
+    // Through the handler: makeConflictHandler's throw contract logs the row
+    // and rethrows, which RxDB treats as a fatal replication error.
+    await expect(
+      handler.resolve({
+        realMasterState: row(
+          { updatedAt: 'T2', writerId: 'dB' },
+          { version: 2 }
+        ),
+        newDocumentState: markerRow(TAMPERED, 1)
+      })
+    ).rejects.toThrow(/was not written for resource/)
+    expect(logged('error')).toHaveLength(1)
+    expect(logged('error')[0]?.data).toMatchObject({ id: 'r1' })
+  })
+
+  it('leaves the no-key classes in the undecryptable bucket', async () => {
+    // The mirror of the integrity case: a key this reader was never given is
+    // still presumed newer and still only warns.
+    const primary = markerRow(UNWRAPPABLE, 2)
+    const winner = await handler.resolve({
+      realMasterState: primary,
+      newDocumentState: row({
+        updatedAt: '2026-01-01T00:00:00Z',
+        writerId: 'dA'
+      })
+    })
+    expect(winner).toBe(primary)
+    expect(logged('error')).toHaveLength(0)
+    expect(logged('warn')).toHaveLength(1)
+    expect(logged('warn')[0]?.data).toMatchObject({ reason: 'key-unwrap' })
+  })
+
+  it('scores a Blob body undecryptable rather than absent', async () => {
+    // Unreachable through was-client's own ciphers here (no context is
+    // passed), so this pins the behavior of a closure that returns one anyway:
+    // a body whose stamp cannot be read is something this client cannot
+    // compare, not nothing to compare.
+    const resolve = lwwResolver({
+      decrypt: async () => new Blob(['chunked'])
+    })
+    const primary = markerRow('anything', 2)
+    await expect(
+      resolve({
+        realMasterState: primary,
+        newDocumentState: row({ updatedAt: 'T9', writerId: 'dA' })
+      })
+    ).resolves.toBe('remote')
+    expect(logged('warn')).toHaveLength(1)
+    expect(logged('warn')[0]?.data).toMatchObject({ reason: 'other' })
   })
 })
 

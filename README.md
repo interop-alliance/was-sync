@@ -76,6 +76,10 @@ injected as a closure, so no cipher, key, or descriptor reaches this package. On
 an encrypted collection that closure should be a refreshing cipher's decrypt
 (`createRefreshingEdvDocCipher` from `@interop/was-client/edv`), which carries
 the once-per-session unknown-epoch re-read; the driver runs no refresh itself.
+Each side is decrypted under its own row id, so the cipher's check that an
+envelope was written for the resource it is being read under still holds here. A
+side that does not decrypt for want of a key is presumed newer and warned about;
+one that fails that integrity check fails the replication cycle instead.
 
 The writer id is an unkeyed, clearable, unrecoverable attribution label, never
 an identity: it derives from no secret, and it can vanish and be re-minted with
@@ -128,9 +132,9 @@ await database.addCollections({
     schema: syncedDocSchema(),
     // Mutable-head collections need a rule; a content-addressed collection
     // takes RxDB's default handler instead.
-    conflictHandler: makeLwwConflictHandler(envelope =>
-      cipher.decrypt(envelope)
-    )
+    // The closure is was-client's own `DocCipher.decrypt`; the resolver
+    // addresses each side by the row's own id.
+    conflictHandler: makeLwwConflictHandler(options => cipher.decrypt(options))
   }
 })
 ```

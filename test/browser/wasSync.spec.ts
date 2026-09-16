@@ -21,7 +21,8 @@ test('the root entry loads and works in a real browser, with no rxdb', async ({
       syncedDocSchema
     } = mod
 
-    const decrypt = async (envelope: { jwe: unknown }) => envelope.jwe
+    const decrypt = async ({ envelope }: { id: string; envelope: unknown }) =>
+      (envelope as { jwe: unknown }).jwe
     const handler = makeLwwConflictHandler(decrypt)
     const stamped = (updatedAt: string, version: number) => ({
       id: 'r1',
