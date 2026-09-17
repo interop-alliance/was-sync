@@ -364,3 +364,194 @@ releases that ONE collection, leaving its siblings replicating and the instance
 startable. Recorded as ARCHITECTURE.md invariant 17.
 
 discovered-from: was-client WCL-50.
+
+### WS-14: Conflict handler's decrypt closure needs the row id and an integrity bucket
+
+- status: done
+- done: 2026-09-16
+- priority: high
+- labels: conflict-handler, encryption, correctness
+- touches:
+  - freewallet: FW-537 (DONE). Not the closure the original list expected --
+    `contactsConflictHandler.ts` wires the generic `makeConflictHandler` and
+    hands the whole `DocCipher` to wallet-core's `resolveContactHeadConflict`,
+    so it owns no decrypt closure. It is still affected: that resolver takes
+    bodies and no ids, so widening it to address each side by row id means the
+    caller passes `realMasterState.id` / `newDocumentState.id`, which it already
+    has in scope. FW-537 is blocked-by WC-236
+  - wallet-core: WC-236 (DONE). `src/sync/contactsConflict.ts:80` calls
+    `cipher.decrypt({ envelope: data })` with no `id`, so it stops typechecking
+    under the new `DocCipher` and skips the binding check; and
+    `contactHeadPayloadOf` (`:78-83`) catches every decrypt failure into
+    `undefined`, which would swallow an `IntegrityError` as "no payload here"
+  - was-react: WR-50 (DONE). `src/storage/localStore.ts:307-310` passes
+    `envelope => decryptEnvelope(key, envelope)` to `makeLwwConflictHandler`,
+    whose single parameter now infers as the whole options object -- a type
+    error, and wrong at runtime besides. `decryptEnvelope` (`:825-830`) needs
+    the row id threaded through to `#decryptWithRefresh`. Its
+    `createPlaintextDocCodec.decrypt` (`src/storage/docCipher.ts:99-112`) still
+    typechecks (an object-literal method is exempt from strict parameter
+    variance) but ignores `id`, so it can never raise `IntegrityError` --
+    deliberate or not, that wants deciding
+- acceptance:
+  - [x] `lwwFieldsOf`, `lwwResolver`, and `makeLwwConflictHandler` accept a
+        `decrypt` shaped like was-client 0.66.0's `DocCipher.decrypt`:
+        `(options: { id: string; envelope: Json; context?: CodecRequestContext })     => Promise<Json | Blob>`
+  - [x] Both calls in `lwwFieldsOf` pass the row's own `id`
+        (`realMasterState.id` / `newDocumentState.id`, the WAS resourceId
+        already on `SyncedDoc`) as the addressed id, not any id read out of the
+        decrypted envelope
+  - [x] `isIntegrityError` is imported from `@interop/was-client/sync` and
+        checked before the existing catch classifies a decrypt failure as
+        `undecryptable`: an integrity failure propagates out of the resolver (a
+        fatal replication error, per this module's existing throw contract)
+        instead of being folded into rule 3's "presumed newer" handling, since a
+        tampered envelope is not an absent key
+  - [x] A test resolves a conflict where one side's `decrypt` throws
+        `IntegrityError` and asserts the resolver throws rather than returning a
+        winner
+  - [x] A test resolves a conflict where `decrypt` throws `UnknownEpochError` /
+        `KeyUnwrapError` and asserts the existing undecryptable-side rules are
+        unaffected
+  - [x] Whether a `decrypt` that resolves a `Blob` here is in scope is decided
+        and recorded: both halves. It is documented as unreachable through
+        was-client's own ciphers (the resolver supplies no `context`, so a
+        chunked envelope raises rather than resolving a `Blob`), and
+        `lwwFieldsOf` still handles one explicitly -- scored `undecryptable`
+        rather than falling through to `none`, since a body whose stamp cannot
+        be read is something this client cannot compare rather than nothing to
+        compare, and `none` would silently lose the write. Recorded as
+        ARCHITECTURE.md invariant 16
+  - [x] `touches:` entries resolved: freewallet FW-537, wallet-core WC-236, and
+        was-react WR-50, all filed 2026-09-16. wallet-core was absent from the
+        original list, and freewallet is affected through it rather than in the
+        way the list anticipated
+  - [x] Depends on `@interop/was-client` 0.66.0 being published and the
+        dependency bumped in `package.json`. The devDependency is on
+        `link:../was-client` in the meantime, so the suites run against the
+        unpublished 0.66.0 surface; it goes back to `^0.66.0` once that is on
+        the registry, and was-sync 0.3.0 does not publish before it
+  - [x] `package.json` raises the `@interop/was-client` peer range from
+        `>=0.59.1 <1.0.0` to `>=0.66.0 <1.0.0`, and the devDependency from
+        `^0.60.0` to `^0.66.0`. A was-sync build whose closure calls
+        `decrypt(envelope)` next to was-client 0.66.0 passes no id: the EDV
+        binding check is silently skipped again, and the plaintext cipher throws
+        `IntegrityError` on every read. The raised range keeps an app from
+        installing that pair
+
+Context: was-client 0.66.0 (not yet published) makes the resource id a required
+argument of `DocCipher.decrypt` and adds an `IntegrityError` thrown when the
+envelope was written for a different id than the one it was read under; see
+`discovered-from: was-client WCL-43, 2026-09-15`. This module's `decrypt`
+closure type is still the old two-argument shape --
+`(envelope: Json) => Promise<Json>` -- at `src/conflictHandler.ts:164-169`
+(`lwwFieldsOf`), `:246-261` (`lwwResolver`'s `options.decrypt`), and `:349-361`
+(`makeLwwConflictHandler`). The row id the new signature needs is already on
+hand: `SyncedDoc.id` is the WAS resourceId carried off the feed
+(`src/types.ts:192-193`, `:220-221`), and `lwwFieldsOf`'s two call sites already
+have `realMasterState` / `newDocumentState` in scope. `lwwFieldsOf`'s blanket
+`try`/`catch` (`:174-179`) currently folds every decrypt failure into the
+`undecryptable` `LwwSide`, and rule 3 in `lwwResolver` (`:291-330`) treats an
+undecryptable side as presumed newer rather than absent. Left unchanged, a
+tampered envelope would read the same as an unseen key epoch: adopted or
+re-asserted with a `warn` log, never rejected. This item threads the id through
+and gives `IntegrityError` its own path -- a thrown, fatal error, matching how
+this module already treats a resolver that cannot make a sound decision.
+
+Discovered while implementing: the integration suite's pinned
+`was-teaching-server@^0.29.0` predates WAS v0.5, and was-client 0.62.0 made
+service discovery mandatory, so every integration test failed with
+`IncompatibleServerError` as soon as the was-client devDependency moved off
+0.60.0. The devDependency is now `^0.35.1`. Too small for an item of its own,
+but it is why the server bump rides this change.
+
+---
+
+### WS-16: Remove the permanent-refusal give-up path once conditional writes are baseline
+
+- status: done
+- done: 2026-09-17
+- priority: medium
+- labels: push, controller, errors, conditional-writes, cleanup
+- blocked-by: WASS-40 shipped 2026-09-16; sequenced after was-client WCL-106 (it
+  needs the was-client release that removes the refusal)
+- touches:
+  - [x] was-client -- WCL-106 removes the affordance gate, the
+        `NotSupportedError` refusal for preconditions, and the `/sync` re-export
+        of `isNotSupportedError`. SHIPPED (0.67.0, 2026-09-16), with one
+        correction: WCL-106 removed only the `no-feature` reason. The
+        `no-validator` refusal survives (a guarded write pinned to a read that
+        returned no `ETag`, which CORS can hide from a browser client), and so
+        does the `/sync` re-export of `isNotSupportedError`, for the consumers
+        that still meet it. Neither reaches this driver: the three surviving
+        raise sites are `src/log/logStore.ts`,
+        `src/edv/logGovernedDescriptorStore.ts`, and `src/internal/cas.ts`,
+        while `src/sync/port.ts` passes `ifMatch` / `ifNoneMatch` straight into
+        `writeHeaders` with no gate, and `createWasSyncPort` bypasses the codec
+        (so the chunked-envelope refusal is out of reach too). The give-up path
+        is dead code here even though the predicate lives on
+  - [x] ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary entry.
+        DONE: both removed, and invariant 5's sentence now names `isAuthError`
+        alone as the walker of RxDB's error graph
+  - [x] README paragraph. DONE: removed
+  - [x] wallet-core WC-237 -- the sibling item being retired on the same spec
+        change. ALREADY SHIPPED: WC-237 is
+        `done (2026-09-16; withdrawn without     implementation)`, closed on
+        this same spec change before its classification was ever written, so
+        nothing is left to remove there
+- acceptance:
+  - [x] `notePermanentRefusal` (`src/pushWrites.ts`) and both call sites are
+        removed
+  - [x] `isPermanentRefusal` and `releaseCollection` (`src/controller.ts`) and
+        the `error$` branch that calls them are removed
+  - [x] `someErrorIn` (`src/controller.ts`) collapses into `isAuthError`, its
+        only remaining caller, with no behavior change to auth-error detection
+  - [x] the `key` / `id` fields on the replication registry entries
+        (`src/controller.ts`) are removed if nothing else needs per-collection
+        lookup by then; kept with a note if something else has since started
+        using them. REMOVED: `releaseCollection` was the only reader; every
+        other use of the registry walks it whole, and `onStatus` is called with
+        the loop's own `key` / `id`
+  - [x] `withFeedPrimaryRead` (`src/feedPrimaryPort.ts`) is untouched: it
+        addresses a CORS ETag problem, not the backend feature, and survives the
+        spec change
+  - [x] ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary entry
+        are removed
+  - [x] the README paragraph describing the give-up behavior is removed
+  - [x] a CHANGELOG entry records the removal as breaking (the exported
+        `isPermanentRefusal` and the give-up behavior it names are gone)
+  - [x] `touches:` entries resolved
+
+Context: WS-15 taught this driver to recognize was-client's `NotSupportedError`
+as permanent and stop the collection rather than let RxDB retry it forever. If
+conditional writes become a requirement of every backend a Collection can be
+created on, no backend can raise that refusal and the whole path is dead code.
+
+What comes out: `notePermanentRefusal` and its two call sites in
+`src/pushWrites.ts`, `isPermanentRefusal` and `releaseCollection` in
+`src/controller.ts`, the `error$` branch that calls it, and the `key` / `id`
+fields added to the replication registry entries to support per-collection
+release. `someErrorIn` collapses back into `isAuthError`, its only remaining
+caller. ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary entry
+go, as does the README paragraph. Roughly 117 source and 300 test lines.
+
+What stays: everything else the 412 machinery does. The conflict assembler, the
+benign-412 delete retry, and the tombstone routing exist because conditional
+writes are used, not because they were optional. `withFeedPrimaryRead` also
+stays: it handles a server that hides the ETag behind CORS, which is a separate
+problem from the backend feature and survives the spec change.
+
+discovered-from: WS-15.
+
+2026-09-17: implemented. The premise was checked against was-client 0.68.0
+before anything was deleted, because WCL-106 turned out to keep both the
+predicate and a narrower refusal (see the `touches:` annotation). The refusal
+that survives cannot reach this driver's port, so the path is dead here and the
+removal stands as filed. 151 node tests and the packaging suite are green with
+it gone.
+
+2026-09-17: follow-up filed. was-client WCL-110 carries what is left there: the
+predicate now has no consumer anywhere in the ecosystem, and its doc comments
+(`src/sync/predicates.ts`, `src/sync/index.ts`) still tell a replication driver
+to build the give-up path this item removed. Whether the export itself goes is a
+decision recorded on that item, not here.

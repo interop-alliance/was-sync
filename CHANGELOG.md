@@ -1,5 +1,24 @@
 # @interop/was-sync Changelog
 
+## 0.5.0 - TBD
+
+### Removed
+
+- BREAKING: the permanent-refusal give-up path, in full. `isPermanentRefusal`
+  (exported from `./rxdb`) is gone, and the push handler no longer classifies or
+  logs was-client's `NotSupportedError` apart from any other rethrow.
+  Conditional writes are a baseline WAS server requirement as of the spec's
+  WASS-40, and was-client 0.67.0 removed the backend-feature gate that raised
+  the refusal, so no write the sync port sends can be refused for want of the
+  feature. An app matching the signal to report a dead collection should drop
+  the branch; nothing else replaces it, because nothing raises it.
+
+### Changed
+
+- The controller no longer stops a single collection on a replication error. An
+  error reports `error` on that collection's status and is left to RxDB's
+  backoff, which is what every remaining replication failure warrants.
+
 ## 0.4.0 - 2026-09-16
 
 ### Changed

@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.67.0
-        version: 0.67.0(@interop/jsonld-signatures@11.8.5)
+        specifier: ^0.68.0
+        version: 0.68.0(@interop/jsonld-signatures@11.8.5)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -70,8 +70,8 @@ importers:
         specifier: ^4.1.7
         version: 4.1.11(@types/node@26.5.0)(@vitest/coverage-v8@4.1.11)(vite@8.2.2(@types/node@26.5.0)(terser@5.51.2)(yaml@2.9.0))
       was-teaching-server:
-        specifier: ^0.35.1
-        version: 0.35.1(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
+        specifier: ^0.37.0
+        version: 0.37.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
 
 packages:
 
@@ -367,8 +367,8 @@ packages:
       react-native-get-random-values:
         optional: true
 
-  '@interop/ezcap@7.4.8':
-    resolution: {integrity: sha512-bCGEefdY0oCXSOoq36GiRknxn7Xci3hAGVuUeJasOovSPsmypJ36p6TIbhPX8BLk1jXqSsU3cLZqbs1pRHWgEQ==}
+  '@interop/ezcap@7.4.9':
+    resolution: {integrity: sha512-pp5WiPkKZZLs3R+YE+FicH3BiqRxNyMO5XLqyZyYGuMmp7fk0PuDTfeSzCwOo32TsQijFRqUxGn0JLGh+K6nuA==}
     engines: {node: '>=20.0'}
 
   '@interop/http-client@1.0.5':
@@ -428,32 +428,24 @@ packages:
     resolution: {integrity: sha512-LrH09nIaLjz+Y4inQO6fgA6cSuv1CypX8p/bNRFKC0EpG36Cp2A24abEmV4jL+HW4Vi4cD0Q3yOaH7WViBkJwg==}
     engines: {node: '>=22.0'}
 
-  '@interop/storage-core@0.15.0':
-    resolution: {integrity: sha512-BeoKrdYKpE92fN6n1oCNKHwSVPMfxW7tcAvELSjAoOnv3vPaV0ofJRfwWkw79kUy1BrMzZImg81m+h1+e5tEnA==}
-    engines: {node: '>=22.0'}
-
-  '@interop/storage-core@0.17.0':
-    resolution: {integrity: sha512-9ulA/uUfPlVTH65BDKlG+x7H8irrWWFLnK4irdDkPSnZ8S1vICsnmV8g04uZ0ehq3raD6V5ol1o7ZxPD5XwJug==}
+  '@interop/storage-core@0.18.0':
+    resolution: {integrity: sha512-T4Cjkv4127pw7/wS6UcwrJdAOYgCKE++LFtvntZX4rX8DDfZzMx7GkvAgqhmivFmyYn+po+6cvE8ir6a3yHaxQ==}
     engines: {node: '>=22.0'}
 
   '@interop/vh-resource-log@0.5.1':
     resolution: {integrity: sha512-jlQ6Oq+3vdUQOtz2FEYu3B3KXAw41yYTUKkg2lkkFt3qvuT+Y/Dn3n59TJqUvj0OH9nbkV+YjuHINIDGMjrHng==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.67.0':
-    resolution: {integrity: sha512-TSg2gw3cbO89ZoURRlF1juZT3/3N+uMqg5wyTO1J9v0BSe3dZGKTjFzPC7WGrywKxKw0wm8o279yKKkpu+Q9vA==}
+  '@interop/was-client@0.68.0':
+    resolution: {integrity: sha512-mL5cA7CvIzMX11yVRj34Oo1YiwamwMT+CV1Dr9MBteN5v++NnvUQ8lVfNBjPhgOoT3sjxkuo3Mm8pFp8wjhm0Q==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.4.0':
     resolution: {integrity: sha512-67xKx0LF1F6iQK8GQzk//XDdWB4cd2FUZtRqKWfMZih5ufMWG51Y/UYPhgEwOVmpbhE62NgS8SeE1SEa7Cgsdg==}
     engines: {node: '>=24.0'}
 
-  '@interop/zcap@11.1.0':
-    resolution: {integrity: sha512-Y0C6RqHnR5fhgXGr0qBWsTfIYBKp+5yMWS3sUdF759IFPJQQslWHo5RwZOiqmhtY4q6PSAmnoQbCed9G1cPkqQ==}
-    engines: {node: '>=24.0'}
-
-  '@interop/zcap@11.3.0':
-    resolution: {integrity: sha512-R+9aAvovfBVfhTCtB/GG5B+iO+V5yRTojVLXRIxwwYZrjRFraF8CUNisYyRkJ9fY9xn7owgj5533ictdTOxLlg==}
+  '@interop/zcap@11.3.1':
+    resolution: {integrity: sha512-Eob4PYvhR0H49fuk9iwyHiPEPesZWDWMu1bfOkM0jTitTdrurAdFCPVT5aWr8kMk+R5YabjUlWhtWxYJbWzgcQ==}
     engines: {node: '>=24.0'}
 
   '@isaacs/ttlcache@1.4.1':
@@ -2653,8 +2645,8 @@ packages:
   walker@1.0.8:
     resolution: {integrity: sha512-ts/8E8l5b7kY0vlWLewOkDXMmPdLcVV4GmOQLyxuSswIJsweeFZtAsMF7k1Nszz+TYBQrlYRmzOnr398y1JemQ==}
 
-  was-teaching-server@0.35.1:
-    resolution: {integrity: sha512-43RMTd/ZJC9fDE7JvdDUuINhuv4BWEguEHT71qjwxbIv6ZREXKIuw9y2XdXzSaUOSAuv2m89ZmDHnI1QOg7xGQ==}
+  was-teaching-server@0.37.0:
+    resolution: {integrity: sha512-2iDJgD0ymqvGN3bdOP2y63NtDBNiQgO4rBjilJa5n+TiHRwsYaQ3+Rgsvu+48KA5NuZM0UZNMh1GKWfLi/i7BA==}
     engines: {node: '>=24.0'}
 
   whatwg-fetch@3.6.20:
@@ -3106,7 +3098,7 @@ snapshots:
     transitivePeerDependencies:
       - expo-crypto
 
-  '@interop/ezcap@7.4.8':
+  '@interop/ezcap@7.4.9':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
       '@interop/data-integrity-proof': 3.4.5
@@ -3114,7 +3106,7 @@ snapshots:
       '@interop/http-client': 1.0.5
       '@interop/http-signature-zcap-invoke': 6.2.6
       '@interop/jsonld-signatures': 11.8.5
-      '@interop/zcap': 11.3.0
+      '@interop/zcap': 11.3.1
     transitivePeerDependencies:
       - expo-crypto
 
@@ -3140,7 +3132,7 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.7.1
       '@interop/http-signature-header': 5.0.3
-      '@interop/zcap': 11.1.0
+      '@interop/zcap': 11.3.1
       '@scure/base': 2.4.0
       pako: 2.2.0
 
@@ -3209,11 +3201,7 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.7.1
 
-  '@interop/storage-core@0.15.0':
-    dependencies:
-      '@interop/data-integrity-core': 8.7.1
-
-  '@interop/storage-core@0.17.0':
+  '@interop/storage-core@0.18.0':
     dependencies:
       '@interop/data-integrity-core': 8.7.1
 
@@ -3222,16 +3210,16 @@ snapshots:
       '@interop/did-method-webvh': 5.9.0
       '@interop/storage-core': 0.13.0
 
-  '@interop/was-client@0.67.0(@interop/jsonld-signatures@11.8.5)':
+  '@interop/was-client@0.68.0(@interop/jsonld-signatures@11.8.5)':
     dependencies:
       '@interop/capability-agent': 0.2.0
       '@interop/data-integrity-core': 8.7.1
       '@interop/ed25519-signature': 7.2.2(@interop/jsonld-signatures@11.8.5)
       '@interop/edv-client': 17.8.4
-      '@interop/ezcap': 7.4.8
+      '@interop/ezcap': 7.4.9
       '@interop/http-client': 1.0.5
       '@interop/minimal-cipher': 7.10.2
-      '@interop/storage-core': 0.17.0
+      '@interop/storage-core': 0.18.0
       '@interop/vh-resource-log': 0.5.1
       '@interop/x25519-key-agreement-key': 5.4.0
       '@noble/hashes': 2.4.0
@@ -3248,13 +3236,7 @@ snapshots:
       '@noble/curves': 2.4.0
       '@scure/base': 2.4.0
 
-  '@interop/zcap@11.1.0':
-    dependencies:
-      '@digitalbazaar/zcap-context': 2.0.1
-      '@interop/data-integrity-core': 8.7.1
-      '@interop/jsonld-signatures': 11.8.5
-
-  '@interop/zcap@11.3.0':
+  '@interop/zcap@11.3.1':
     dependencies:
       '@digitalbazaar/zcap-context': 2.0.1
       '@interop/data-integrity-core': 8.7.1
@@ -5456,7 +5438,7 @@ snapshots:
     dependencies:
       makeerror: 1.0.12
 
-  was-teaching-server@0.35.1(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8)):
+  was-teaching-server@0.37.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8)):
     dependencies:
       '@digitalcredentials/bnid': 5.0.0(react-native@0.87.1(@babel/core@7.29.7)(react@19.2.8))
       '@fastify/cors': 11.3.0
@@ -5476,9 +5458,9 @@ snapshots:
       '@interop/lru-memoize': 4.0.3
       '@interop/minimal-cipher': 7.10.2
       '@interop/security-document-loader': 10.1.2
-      '@interop/storage-core': 0.15.0
+      '@interop/storage-core': 0.18.0
       '@interop/x25519-key-agreement-key': 5.4.0
-      '@interop/zcap': 11.3.0
+      '@interop/zcap': 11.3.1
       '@scure/base': 2.4.0
       fastify: 5.12.3
       fastify-plugin: 6.0.0

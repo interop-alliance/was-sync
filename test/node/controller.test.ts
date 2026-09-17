@@ -16,7 +16,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { captureLogger } from '@interop/logger'
 import type { WasClient } from '@interop/was-client'
-import { NotSupportedError, WasSyncAuthError } from '@interop/was-client/sync'
+import { WasSyncAuthError } from '@interop/was-client/sync'
 import { memoryOnlineSource, memorySchedule } from '../../src/testing.js'
 import { setLogger } from '../../src/log.js'
 
@@ -26,7 +26,7 @@ vi.mock('../../src/wasReplication.js', () => ({
   createWasReplication: (...args: unknown[]) => createWasReplication(...args)
 }))
 
-const { createSyncController, isAuthError, isPermanentRefusal } =
+const { createSyncController, isAuthError } =
   await import('../../src/controller.js')
 
 /**
@@ -387,151 +387,6 @@ describe('createSyncController error escalation', () => {
     const cyclic: { cause?: unknown } = {}
     cyclic.cause = cyclic
     expect(isAuthError(cyclic)).toBe(false)
-    expect(isPermanentRefusal(cyclic)).toBe(false)
-  })
-})
-
-describe('createSyncController permanent refusal', () => {
-  /**
-   * The refusal as RxDB delivers it: the push handler's thrown error, wrapped
-   * in an RxError and serialized to plain JSON on the way, so only the `name`
-   * is left to match on.
-   */
-  const wrappedRefusal = {
-    code: 'RC_PUSH',
-    parameters: {
-      errors: [
-        {
-          name: 'NotSupportedError',
-          message:
-            "This write carries a precondition and the collection's backend " +
-            "does not advertise the 'conditional-writes' feature."
-        }
-      ]
-    }
-  }
-
-  it('classifies the refusal through the wrapping, and keeps it apart from an auth error', () => {
-    expect(isPermanentRefusal(wrappedRefusal)).toBe(true)
-    expect(isPermanentRefusal({ cause: new NotSupportedError('no') })).toBe(
-      true
-    )
-    expect(isPermanentRefusal(new Error('network down'))).toBe(false)
-    // The two escalations must not trade places: a refusal is not revoked
-    // access, and revoked access is recoverable by re-delegating.
-    expect(isAuthError(wrappedRefusal)).toBe(false)
-    expect(isPermanentRefusal(new WasSyncAuthError(403))).toBe(false)
-  })
-
-  it('stops the refusing collection, leaves it in error, and never fires onAuthError', async () => {
-    const cancelOrder: string[] = []
-    const replication = fakeReplication(cancelOrder, 'notes')
-    createWasReplication.mockReturnValue(replication)
-    const onAuthError = vi.fn()
-    const statuses: string[] = []
-    const controller = createSyncController({
-      port: {
-        wasClient,
-        spaceId: 'space-1',
-        serverUrl: 'https://was.example',
-        collections: [{ key: 'notes', id: 'notes' }],
-        rxCollection: (() => fakeRxCollection()) as never
-      },
-      onStatus: (_key, _id, status) => statuses.push(status),
-      onAuthError,
-      pollMs: 0
-    })
-    await controller.start()
-
-    replication.error$.emit(wrappedRefusal)
-    // The release is queued behind the start, so it settles on the next turn.
-    await controller.start()
-
-    expect(cancelOrder).toEqual(['notes'])
-    expect(onAuthError).not.toHaveBeenCalled()
-    // Both subscriptions are gone, so a late `active$` cannot paint over the
-    // error the collection is left in.
-    expect(replication.active$.live()).toBe(0)
-    expect(replication.error$.live()).toBe(0)
-    expect(statuses.at(-1)).toBe('error')
-    expect(logged('error')).toContain(
-      'Giving up on the collection: its backend refuses guarded writes'
-    )
-
-    // Released from the registry: no further reSync reaches it.
-    controller.reSync()
-    expect(replication.reSync).not.toHaveBeenCalled()
-    await controller.stop()
-    // And `stop()` does not cancel it a second time.
-    expect(replication.cancel).toHaveBeenCalledOnce()
-  })
-
-  it('leaves the sibling collections replicating', async () => {
-    const cancelOrder: string[] = []
-    const notes = fakeReplication(cancelOrder, 'notes')
-    const contacts = fakeReplication(cancelOrder, 'contacts')
-    createWasReplication
-      .mockReturnValueOnce(notes)
-      .mockReturnValueOnce(contacts)
-    const controller = createSyncController({
-      port: {
-        wasClient,
-        spaceId: 'space-1',
-        serverUrl: 'https://was.example',
-        collections: [
-          { key: 'notes', id: 'notes' },
-          { key: 'contacts', id: 'contacts' }
-        ],
-        rxCollection: (() => fakeRxCollection()) as never
-      },
-      onStatus: () => {},
-      pollMs: 0
-    })
-    await controller.start()
-
-    // Only `notes` sits on a backend without conditional writes; the rest of
-    // the Space is unaffected, so the session is not given up on.
-    notes.error$.emit(wrappedRefusal)
-    await controller.start()
-
-    expect(cancelOrder).toEqual(['notes'])
-    expect(contacts.error$.live()).toBe(1)
-    controller.reSync()
-    expect(contacts.reSync).toHaveBeenCalledOnce()
-    expect(notes.reSync).not.toHaveBeenCalled()
-
-    await controller.stop()
-    expect(cancelOrder).toEqual(['notes', 'contacts'])
-  })
-
-  it('survives a cancel that throws while releasing', async () => {
-    const replication = fakeReplication([], 'notes')
-    replication.cancel = vi.fn(async () => {
-      throw new Error('database closed')
-    })
-    createWasReplication.mockReturnValue(replication)
-    const statuses: string[] = []
-    const controller = createSyncController({
-      port: {
-        wasClient,
-        spaceId: 'space-1',
-        serverUrl: 'https://was.example',
-        collections: [{ key: 'notes', id: 'notes' }],
-        rxCollection: (() => fakeRxCollection()) as never
-      },
-      onStatus: (_key, _id, status) => statuses.push(status),
-      pollMs: 0
-    })
-    await controller.start()
-
-    replication.error$.emit(wrappedRefusal)
-    await controller.start()
-
-    // The entry still leaves the registry and the collection still reads
-    // `error`: a cancel that cannot complete must not wedge the queue.
-    expect(statuses.at(-1)).toBe('error')
-    expect(logged('error')).toContain('Error cancelling replication')
-    await controller.stop()
   })
 })
 

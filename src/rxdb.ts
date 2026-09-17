@@ -21,7 +21,6 @@ export { withFeedPrimaryRead } from './feedPrimaryPort.js'
 export {
   createSyncController,
   isAuthError,
-  isPermanentRefusal,
   type SyncController,
   type SyncOnlineSource,
   type SyncSchedule
