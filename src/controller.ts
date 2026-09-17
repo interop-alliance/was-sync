@@ -22,6 +22,14 @@
  * and a test drives both; and diagnostics go through the package's logging
  * seam (`setLogger`), which an app wires once at bootstrap.
  *
+ * One replication error is not worth retrying. A guarded write against a
+ * collection whose backend advertises no `conditional-writes` is refused with
+ * `NotSupportedError` before it is sent, and no later attempt changes that, so
+ * RxDB's backoff would re-send the same batch forever. The controller stops
+ * that ONE collection's replication and leaves its status at `error`; its
+ * siblings keep replicating, since only a client-registered external backend
+ * reaches this and the rest of the Space is unaffected.
+ *
  * The lifecycle reconciles two properties the consuming apps each had one half
  * of. Every transition runs on a serialized FIFO queue, so an overlapping start
  * and stop can never interleave and leave a dangling replication. And `stop()`
@@ -34,6 +42,7 @@ import type { RxReplicationState } from 'rxdb/plugins/replication'
 import type { IZcap, WasClient } from '@interop/was-client'
 import {
   createWasSyncPort,
+  isNotSupportedError,
   isSyncAuthError,
   type SyncStatus
 } from '@interop/was-client/sync'
@@ -85,23 +94,31 @@ const defaultSchedule: SyncSchedule = {
 }
 
 /**
- * Whether a replication error signals expired or revoked storage access. Every
- * WAS request the replication makes funnels through the sync port, which (under
- * `mapAuthErrors`) maps a `401` / `403` / masked `404` to was-client's
- * `WasSyncAuthError` at the boundary. RxDB then wraps that thrown error inside
- * an RxError (nested under `cause` / `errors` / `parameters.errors`), so this
- * walks the error graph looking for the signal rather than re-extracting raw
- * status codes.
+ * Whether a was-client signal is somewhere in a replication error, under
+ * RxDB's wrapping. A handler's thrown error arrives inside an RxError, nested
+ * under `cause` / `errors` / `parameters.errors`, so a leaf test applied to the
+ * emitted value alone would miss every one of them. The walk is breadth-first
+ * over those three edges and remembers what it has seen, so a cycle in the
+ * graph terminates instead of hanging the subscriber that called it.
  *
- * The leaf test is `isSyncAuthError`, a name check: RxDB's wrapping serializes
- * the handler's thrown error to plain JSON (name, message, stack -- through
- * `errorToPlainJson`), so a live instance never survives the wrapping, and a
- * second resolved copy of was-client would defeat an `instanceof`.
+ * Every `matches` passed here is a name check, because RxDB serializes the
+ * thrown error to plain JSON on the way in (name, message, stack -- through
+ * `errorToPlainJson`): no live instance survives the wrapping, and a second
+ * resolved copy of was-client would defeat an `instanceof` even if one did
+ * (invariant 5).
  *
- * @param err {unknown}
+ * @param options {object}
+ * @param options.err {unknown}
+ * @param options.matches {(value: unknown) => boolean}   the leaf name check
  * @returns {boolean}
  */
-export function isAuthError(err: unknown): boolean {
+function someErrorIn({
+  err,
+  matches
+}: {
+  err: unknown
+  matches: (value: unknown) => boolean
+}): boolean {
   const seen = new Set<unknown>()
   const queue: unknown[] = [err]
   while (queue.length > 0) {
@@ -110,7 +127,7 @@ export function isAuthError(err: unknown): boolean {
       continue
     }
     seen.add(current)
-    if (isSyncAuthError(current)) {
+    if (matches(current)) {
       return true
     }
     const candidate = current as {
@@ -129,6 +146,35 @@ export function isAuthError(err: unknown): boolean {
     }
   }
   return false
+}
+
+/**
+ * Whether a replication error signals expired or revoked storage access. Every
+ * WAS request the replication makes funnels through the sync port, which (under
+ * `mapAuthErrors`) maps a `401` / `403` / masked `404` to was-client's
+ * `WasSyncAuthError` at the boundary, so this looks for that signal rather than
+ * re-extracting raw status codes.
+ *
+ * @param err {unknown}
+ * @returns {boolean}
+ */
+export function isAuthError(err: unknown): boolean {
+  return someErrorIn({ err, matches: isSyncAuthError })
+}
+
+/**
+ * Whether a replication error is the permanent refusal: `NotSupportedError`,
+ * raised by the sync port before a guarded write is sent because the
+ * collection's backend advertises no `conditional-writes`. Distinct from every
+ * other error on `error$` in exactly one way that matters here -- retrying
+ * cannot help, because the backend does not gain the feature between attempts
+ * -- so the collection's replication is stopped rather than backed off.
+ *
+ * @param err {unknown}
+ * @returns {boolean}
+ */
+export function isPermanentRefusal(err: unknown): boolean {
+  return someErrorIn({ err, matches: isNotSupportedError })
 }
 
 /**
@@ -197,7 +243,11 @@ export function createSyncController({
   onlineSource?: SyncOnlineSource
   pollMs: number
 }): SyncController {
+  // Each entry carries its own keys, so the permanent-refusal path can release
+  // ONE collection by name without disturbing its siblings.
   const replications: Array<{
+    key: string
+    id: string
     state: RxReplicationState<SyncedDoc, SyncCheckpoint>
     subscriptions: Unsubscribable[]
   }> = []
@@ -269,6 +319,35 @@ export function createSyncController({
     replications.length = 0
   }
 
+  /**
+   * Releases ONE collection's replication, leaving the rest of the session
+   * running. The subscriptions go first, so the cancel cannot emit an
+   * `active$` status over the `error` this leaves standing, and the entry
+   * leaves `replications` so neither `reSync()` nor a later `teardown()` can
+   * reach it again. Nothing latches: `started` stays as it is and the instance
+   * is still startable, because this is one collection giving up rather than
+   * the session.
+   *
+   * @param key {string}   the logical key of the collection to release
+   * @returns {Promise<void>}
+   */
+  async function releaseCollection(key: string): Promise<void> {
+    const entry = replications.find(candidate => candidate.key === key)
+    if (entry === undefined) {
+      return
+    }
+    replications.splice(replications.indexOf(entry), 1)
+    for (const subscription of entry.subscriptions) {
+      subscription.unsubscribe()
+    }
+    try {
+      await entry.state.cancel()
+    } catch (err) {
+      log.error('Error cancelling replication', { id: entry.id, err })
+    }
+    onStatus(entry.key, entry.id, 'error')
+  }
+
   async function startOnce(): Promise<void> {
     if (started || stopped) {
       return
@@ -309,6 +388,8 @@ export function createSyncController({
         // defaults to `autoStart`, so a throw between construction and
         // registration would leave a live replication `stop()` cannot reach.
         const entry = {
+          key,
+          id,
           state,
           subscriptions: [] as Unsubscribable[]
         }
@@ -321,6 +402,18 @@ export function createSyncController({
           state.error$.subscribe(err => {
             log.error('Sync error for collection', { id, err })
             onStatus(key, id, 'error')
+            // A refusal a retry cannot fix: give this collection up rather
+            // than let RxDB's backoff re-send the same batch forever. The
+            // release is queued, so it settles behind any in-flight start or
+            // stop instead of racing it.
+            if (isPermanentRefusal(err)) {
+              log.error(
+                'Giving up on the collection: its backend refuses guarded writes',
+                { id }
+              )
+              void enqueue(() => releaseCollection(key))
+              return
+            }
             if (onAuthError !== undefined && isAuthError(err)) {
               onAuthError()
             }

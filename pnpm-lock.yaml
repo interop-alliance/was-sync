@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.66.0
-        version: 0.66.0(@interop/jsonld-signatures@11.8.5)
+        specifier: ^0.67.0
+        version: 0.67.0(@interop/jsonld-signatures@11.8.5)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -432,12 +432,16 @@ packages:
     resolution: {integrity: sha512-BeoKrdYKpE92fN6n1oCNKHwSVPMfxW7tcAvELSjAoOnv3vPaV0ofJRfwWkw79kUy1BrMzZImg81m+h1+e5tEnA==}
     engines: {node: '>=22.0'}
 
+  '@interop/storage-core@0.17.0':
+    resolution: {integrity: sha512-9ulA/uUfPlVTH65BDKlG+x7H8irrWWFLnK4irdDkPSnZ8S1vICsnmV8g04uZ0ehq3raD6V5ol1o7ZxPD5XwJug==}
+    engines: {node: '>=22.0'}
+
   '@interop/vh-resource-log@0.5.1':
     resolution: {integrity: sha512-jlQ6Oq+3vdUQOtz2FEYu3B3KXAw41yYTUKkg2lkkFt3qvuT+Y/Dn3n59TJqUvj0OH9nbkV+YjuHINIDGMjrHng==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.66.0':
-    resolution: {integrity: sha512-iABkgo4BAvqatsg1EhJfd4BsvOVravDbJgWGfO7AH8rpcYMSUZVG28g1ZKWwnYEnczl6ZwUNbMGcQeWTT3px6Q==}
+  '@interop/was-client@0.67.0':
+    resolution: {integrity: sha512-TSg2gw3cbO89ZoURRlF1juZT3/3N+uMqg5wyTO1J9v0BSe3dZGKTjFzPC7WGrywKxKw0wm8o279yKKkpu+Q9vA==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.4.0':
@@ -3209,12 +3213,16 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.7.1
 
+  '@interop/storage-core@0.17.0':
+    dependencies:
+      '@interop/data-integrity-core': 8.7.1
+
   '@interop/vh-resource-log@0.5.1':
     dependencies:
       '@interop/did-method-webvh': 5.9.0
       '@interop/storage-core': 0.13.0
 
-  '@interop/was-client@0.66.0(@interop/jsonld-signatures@11.8.5)':
+  '@interop/was-client@0.67.0(@interop/jsonld-signatures@11.8.5)':
     dependencies:
       '@interop/capability-agent': 0.2.0
       '@interop/data-integrity-core': 8.7.1
@@ -3223,7 +3231,7 @@ snapshots:
       '@interop/ezcap': 7.4.8
       '@interop/http-client': 1.0.5
       '@interop/minimal-cipher': 7.10.2
-      '@interop/storage-core': 0.15.0
+      '@interop/storage-core': 0.17.0
       '@interop/vh-resource-log': 0.5.1
       '@interop/x25519-key-agreement-key': 5.4.0
       '@noble/hashes': 2.4.0

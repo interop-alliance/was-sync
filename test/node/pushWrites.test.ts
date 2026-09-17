@@ -10,6 +10,7 @@ import { describe, it, expect } from 'vitest'
 import { captureLogger } from '@interop/logger'
 
 import {
+  NotSupportedError,
   WasSyncAuthError,
   WasSyncConflictError,
   WasSyncNotFoundError
@@ -62,8 +63,8 @@ type WriteCall =
  * A fake port that records every write VERBATIM (each recorded call spreads the
  * options object it received, so an absent member -- a cleared `custom`, an
  * absent `epoch` -- is genuinely absent from the record and testable with
- * `in`), optionally throws a conflict, a not-found signal, or a masked-404 auth
- * error for a chosen (kind,id), serves a scripted `get` primary state (or a scripted `get`
+ * `in`), optionally throws a conflict, a not-found signal, a masked-404 auth
+ * error, or the guarded-write refusal for a chosen (kind,id), serves a scripted `get` primary state (or a scripted `get`
  * rejection) for the re-read, and acks writes like a versioning server: each
  * accepted content write returns the next content version + its etag (via
  * {@link etagFor}), each accepted meta write the next metaVersion + its etag
@@ -76,6 +77,7 @@ function fakePushPort(
     conflictOn?: { kind: WriteCall['kind']; id: string }
     notFoundOn?: { kind: WriteCall['kind']; id: string }
     auth404On?: { kind: WriteCall['kind']; id: string }
+    notSupportedOn?: { kind: WriteCall['kind']; id: string }
     primary?: PrimaryState | null
     getRejectsWith?: unknown
     ackWrites?: boolean
@@ -95,6 +97,17 @@ function fakePushPort(
     }
     if (options.auth404On?.kind === kind && options.auth404On.id === id) {
       throw new WasSyncAuthError(404)
+    }
+    if (
+      options.notSupportedOn?.kind === kind &&
+      options.notSupportedOn.id === id
+    ) {
+      // The shape was-client's port raises BEFORE the request, when the write
+      // names a precondition and the backend advertises no conditional-writes.
+      throw new NotSupportedError(
+        "This write carries a precondition and the collection's backend does " +
+          "not advertise the 'conditional-writes' feature."
+      )
     }
   }
   // A real write always acks at least the new version (the server's
@@ -1602,5 +1615,146 @@ describe('createPushHandler typed signals from another copy', () => {
         _deleted: true
       }
     ])
+  })
+})
+
+describe('createPushHandler permanent refusal', () => {
+  /**
+   * Runs one push against a port that refuses the named write, capturing the
+   * package's log events for the run. Returns the rejection alongside the
+   * port, so each case can assert BOTH that nothing was re-sent and that the
+   * refusal reached the logging seam.
+   *
+   * @param options {object}
+   * @param options.refuse {object}   the (kind,id) the port refuses
+   * @param options.rows {Array}      the push rows to send
+   * @returns {Promise<object>}
+   */
+  async function pushRefused({
+    refuse,
+    rows
+  }: {
+    refuse: { kind: WriteCall['kind']; id: string }
+    rows: Array<{
+      newDocumentState: WithDeleted<SyncedDoc>
+      assumedMasterState?: WithDeleted<SyncedDoc>
+    }>
+  }) {
+    const port = fakePushPort({ notSupportedOn: refuse })
+    const push = createPushHandler(port)
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
+    try {
+      const rejection = await push(rows).then(
+        () => null,
+        (err: unknown) => err
+      )
+      return { port, rejection, events: capture.events }
+    } finally {
+      setLogger(previous)
+    }
+  }
+
+  it('rethrows a refused create without re-sending it or re-reading the primary', async () => {
+    // The port refuses before the request, so nothing reached the server and
+    // there is no 412 to assemble a conflict entry from.
+    const { port, rejection, events } = await pushRefused({
+      refuse: { kind: 'putContent', id: 'r1' },
+      rows: [{ newDocumentState: newDoc({ data: { a: 1 } }) }]
+    })
+
+    expect((rejection as Error).name).toBe('NotSupportedError')
+    expect(port.writes).toHaveLength(1)
+    expect(port.getCalls).toEqual([])
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      level: 'error',
+      msg: 'Guarded write refused: the backend has no conditional-writes',
+      data: { id: 'r1' }
+    })
+  })
+
+  it('does not run the benign-412 retry for a refused delete', async () => {
+    // The benign re-issue fires on a CONFLICT alone. A refusal is not one, so
+    // the delete goes out once and the handler gives up on the row.
+    const { port, rejection, events } = await pushRefused({
+      refuse: { kind: 'deleteContent', id: 'r1' },
+      rows: [
+        {
+          assumedMasterState: newDoc({
+            version: 3,
+            etag: etagFor(3),
+            data: { a: 1 }
+          }),
+          newDocumentState: newDoc({ version: 3, _deleted: true })
+        }
+      ]
+    })
+
+    expect((rejection as Error).name).toBe('NotSupportedError')
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(3) }
+    ])
+    expect(port.getCalls).toEqual([])
+    expect(events).toHaveLength(1)
+    expect(events[0]?.level).toBe('error')
+  })
+
+  it('does not corroborate a refused /meta write against the feed', async () => {
+    // The `/meta` 404 recovery is for an ambiguous not-found. A refusal is
+    // unambiguous, so it skips the re-read and propagates.
+    const { port, rejection, events } = await pushRefused({
+      refuse: { kind: 'putMeta', id: 'r1' },
+      rows: [
+        {
+          newDocumentState: newDoc({ data: { a: 1 }, custom: { jwe: 'x' } })
+        }
+      ]
+    })
+
+    expect((rejection as Error).name).toBe('NotSupportedError')
+    expect(port.writes.map(write => write.kind)).toEqual([
+      'putContent',
+      'putMeta'
+    ])
+    expect(port.getCalls).toEqual([])
+    expect(events).toHaveLength(1)
+    expect(events[0]?.level).toBe('error')
+  })
+
+  it('classifies a refusal raised by an unrelated copy of was-client', async () => {
+    // Matched by `name`, so a second resolved copy of the package -- or RxDB's
+    // plain-JSON rewrite of the thrown error -- still reads as the refusal.
+    const foreign = { name: 'NotSupportedError', message: 'no conditionals' }
+    const port: WasSyncPort = {
+      async query() {
+        return { documents: [], checkpoint: null }
+      },
+      async putContent() {
+        throw foreign
+      },
+      async deleteContent() {
+        return undefined
+      },
+      async putMeta() {
+        return undefined
+      },
+      async get() {
+        return null
+      }
+    }
+    const push = createPushHandler(port)
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
+
+    try {
+      await expect(
+        push([{ newDocumentState: newDoc({ data: { a: 1 } }) }])
+      ).rejects.toBe(foreign)
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]?.level).toBe('error')
+    } finally {
+      setLogger(previous)
+    }
   })
 })

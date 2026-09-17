@@ -1,6 +1,6 @@
 # WAS Sync Roadmap (open items)
 
-nextAvailableId: 16
+nextAvailableId: 17
 
 Status as of 2026-09-05. Uses the formalized item structure shared across the
 `@interop/*` repos.
@@ -82,13 +82,13 @@ server never assigns one (see WS-11).
 - priority: high
 - labels: conflict-handler, encryption, correctness
 - touches:
-  - freewallet: wallet-core WC-236. Not the closure the original list expected
-    -- `contactsConflictHandler.ts` wires the generic `makeConflictHandler` and
+  - freewallet: FW-537. Not the closure the original list expected --
+    `contactsConflictHandler.ts` wires the generic `makeConflictHandler` and
     hands the whole `DocCipher` to wallet-core's `resolveContactHeadConflict`,
     so it owns no decrypt closure. It is still affected: that resolver takes
     bodies and no ids, so widening it to address each side by row id means the
     caller passes `realMasterState.id` / `newDocumentState.id`, which it already
-    has in scope. Tracked as the freewallet entry on WC-236
+    has in scope. FW-537 is blocked-by WC-236
   - wallet-core: WC-236 (added on audit, absent from the original list).
     `src/sync/contactsConflict.ts:80` calls `cipher.decrypt({ envelope: data })`
     with no `id`, so it stops typechecking under the new `DocCipher` and skips
@@ -133,11 +133,11 @@ server never assigns one (see WS-11).
         be read is something this client cannot compare rather than nothing to
         compare, and `none` would silently lose the write. Recorded as
         ARCHITECTURE.md invariant 16
-  - [x] `touches:` entries resolved: wallet-core WC-236 (which carries
-        freewallet's caller change as its own `touches:` entry) and was-react
-        WR-50, both filed 2026-09-16. wallet-core was absent from the original
-        list and freewallet is affected only through it
-  - [ ] Depends on `@interop/was-client` 0.66.0 being published and the
+  - [x] `touches:` entries resolved: freewallet FW-537, wallet-core WC-236, and
+        was-react WR-50, all filed 2026-09-16. wallet-core was absent from the
+        original list, and freewallet is affected through it rather than in the
+        way the list anticipated
+  - [x] Depends on `@interop/was-client` 0.66.0 being published and the
         dependency bumped in `package.json`. The devDependency is on
         `link:../was-client` in the meantime, so the suites run against the
         unpublished 0.66.0 surface; it goes back to `^0.66.0` once that is on
@@ -246,31 +246,59 @@ rather than one. That is slower than k concurrent unmemoized walks. The existing
 "walks again for an id the memo never saw" test demonstrates the re-walk, and
 both "one walk" tests place every id on one page.
 
-### WS-15: Push retries a permanent `NotSupportedError` forever
+### WS-16: Remove the permanent-refusal give-up path once conditional writes are baseline
 
 - status: todo
 - priority: medium
-- labels: push, errors, was-client-port, conditional-writes
+- labels: push, controller, errors, conditional-writes, cleanup
+- blocked-by: WASS-40 shipped 2026-09-16; sequenced after was-client WCL-106
+  (it needs the was-client release that removes the refusal)
 - touches:
-  - was-client (0.66.0, not yet published -- the sync port's `putContent`,
-    `deleteContent`, and `putMeta` now throw `NotSupportedError` before any
-    request when they carry `ifMatch` / `ifNoneMatch` and the collection's
-    backend does not advertise `conditional-writes`)
+  - [ ] was-client -- WCL-106 removes the affordance gate, the
+        `NotSupportedError` refusal for preconditions, and the `/sync`
+        re-export of `isNotSupportedError`
+  - [ ] ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary entry
+  - [ ] README paragraph
+  - [ ] wallet-core WC-237 -- the sibling item being retired on the same
+        spec change
 - acceptance:
-  - [ ] `src/pushWrites.ts` classifies `NotSupportedError` (by `name`) as
-        permanent rather than letting it fall into the retry-with-backoff bucket
-  - [ ] `src/controller.ts` stops the collection's replication on it and reports
-        the collection as `error` with the refusal as the cause
-  - [ ] A test with a port that throws `NotSupportedError` on a guarded push
-        shows no retry
+  - [ ] `notePermanentRefusal` (`src/pushWrites.ts`) and both call sites are
+        removed
+  - [ ] `isPermanentRefusal` and `releaseCollection` (`src/controller.ts`) and
+        the `error$` branch that calls them are removed
+  - [ ] `someErrorIn` (`src/controller.ts`) collapses into `isAuthError`, its
+        only remaining caller, with no behavior change to auth-error detection
+  - [ ] the `key` / `id` fields on the replication registry entries
+        (`src/controller.ts`) are removed if nothing else needs per-collection
+        lookup by then; kept with a note if something else has since started
+        using them
+  - [ ] `withFeedPrimaryRead` (`src/feedPrimaryPort.ts`) is untouched: it
+        addresses a CORS ETag problem, not the backend feature, and survives
+        the spec change
+  - [ ] ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary
+        entry are removed
+  - [ ] the README paragraph describing the give-up behavior is removed
+  - [ ] a CHANGELOG entry records the removal as breaking (the exported
+        `isPermanentRefusal` and the give-up behavior it names are gone)
+  - [ ] `touches:` entries resolved
 
-Context: `pushWrites.ts` (around line 361) lets every non-conflict error
-propagate so RxDB retries the batch with backoff, and `controller.ts` only
-special-cases `WasSyncAuthError`. The new refusal is permanent: a backend that
-does not advertise `conditional-writes` will not start enforcing preconditions
-on a retry. Against the reference server every server-managed backend advertises
-the token, so only a client-registered external backend reaches this today.
-Decide whether a dedicated predicate on was-client's `./sync` subpath is wanted,
-or a local name check is enough.
+Context: WS-15 taught this driver to recognize was-client's `NotSupportedError`
+as permanent and stop the collection rather than let RxDB retry it forever. If
+conditional writes become a requirement of every backend a Collection can be
+created on, no backend can raise that refusal and the whole path is dead code.
 
-discovered-from: was-client WCL-50.
+What comes out: `notePermanentRefusal` and its two call sites in
+`src/pushWrites.ts`, `isPermanentRefusal` and `releaseCollection` in
+`src/controller.ts`, the `error$` branch that calls it, and the `key` / `id`
+fields added to the replication registry entries to support per-collection
+release. `someErrorIn` collapses back into `isAuthError`, its only remaining
+caller. ARCHITECTURE.md invariant 17 and the "Permanent refusal" glossary entry
+go, as does the README paragraph. Roughly 117 source and 300 test lines.
+
+What stays: everything else the 412 machinery does. The conflict assembler, the
+benign-412 delete retry, and the tombstone routing exist because conditional
+writes are used, not because they were optional. `withFeedPrimaryRead` also
+stays: it handles a server that hides the ETag behind CORS, which is a separate
+problem from the backend feature and survives the spec change.
+
+discovered-from: WS-15.

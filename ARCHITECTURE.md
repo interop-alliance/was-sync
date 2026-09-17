@@ -41,7 +41,7 @@ src/feedPrimaryPort.ts   The opt-in feed-backed conflict re-read (a server that
                          hides the ETag behind CORS)
 src/controller.ts        The controller core: the serialized lifecycle, the
                          per-collection replications, status, auth escalation,
-                         polling, reachability
+                         the permanent-refusal release, polling, reachability
 
 src/testing.ts           The "./testing" door: the stub port, and the memory
                          schedule and online source
@@ -147,8 +147,8 @@ numbered so items and reviews can cite them.
    from `@interop/was-client/sync` (was-client's
    `decisions/0001-cross-package-errors-match-by-name.md`); reading `err.status`
    after the name match is the intended shape. The controller's `isAuthError`
-   walks RxDB's error graph because RxDB serializes a thrown handler error to
-   plain JSON, so only the name survives.
+   and `isPermanentRefusal` walk RxDB's error graph because RxDB serializes a
+   thrown handler error to plain JSON, so only the name survives.
 6. **JCS-canonical body equality.** `bodiesEqual` compares canonicalized JSON
    rather than `JSON.stringify` output. It decides whether a write is issued at
    all and whether the delete retry fires, so a host that re-serializes a stored
@@ -236,6 +236,20 @@ numbered so items and reviews can cite them.
     for a chunked envelope read with the context that fetches the chunks, which
     this resolver never supplies, and a closure that returns one anyway is
     scored `undecryptable` rather than `none` so the write is not silently lost.
+17. **The permanent refusal is given up on, one collection at a time.** A
+    guarded write against a collection whose backend advertises no
+    `conditional-writes` is refused by the sync port with `NotSupportedError`
+    before any request, and no later attempt changes that, so RxDB's backoff
+    would re-send the same batch forever and starve every row behind it. The
+    push handler classifies it (through was-client's `isNotSupportedError`,
+    invariant 5), logs it at `error`, and rethrows it unchanged -- it holds no
+    replication handle and RxDB's push contract has no "give up" return. The
+    controller's `isPermanentRefusal` finds it on `error$` under RxDB's wrapping
+    and releases THAT collection: subscriptions first, then `cancel()`, then the
+    registry entry, leaving its status at `error`. Its siblings keep replicating
+    and the instance stays startable. Only a client-registered external backend
+    reaches this against the reference server, where every server-managed
+    backend advertises the token.
 
 ## Ownership heuristics
 
@@ -314,6 +328,11 @@ the byoe-ecosystem layer map instead.
   `DocCipher.decrypt`). It is the only seam in the driver that reads a body, and
   it is called with the row's own id and no codec context. Avoid: cipher,
   decryptor, unseal.
+- **Permanent refusal** -- `NotSupportedError`, raised by the sync port before a
+  guarded write is sent because the collection's backend advertises no
+  `conditional-writes`. The one push failure a retry cannot fix, and the one the
+  controller stops a collection on rather than backing off. Avoid: unsupported
+  error, fatal push error.
 - **Undecryptable side** -- a conflict side whose body is there but unreadable
   on this client, as distinct from an absent one (`none`). Scored apart because
   an unreadable body is presumed newer rather than lost. An integrity failure is

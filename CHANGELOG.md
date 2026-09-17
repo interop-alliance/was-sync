@@ -1,5 +1,23 @@
 # @interop/was-sync Changelog
 
+## 0.4.0 - TBD
+
+### Changed
+
+- The push handler treats was-client's `NotSupportedError` as permanent rather
+  than transient. The sync port raises it before a guarded write is sent when
+  the collection's backend advertises no `conditional-writes`, and a retry
+  cannot change that, so the refusal is logged at `error` and rethrown unchanged
+  instead of being left to look like a network failure.
+- The controller stops a collection whose replication reports that refusal:
+  `isPermanentRefusal` (new, exported from `./rxdb`) finds it under RxDB's error
+  wrapping, and the collection's subscriptions, replication, and registry entry
+  are released, leaving its status at `error`. Sibling collections keep
+  replicating and the controller stays startable. Without this RxDB re-sent the
+  refused batch forever, starving every row behind it.
+- Raise the `@interop/was-client` peer range to `>=0.67.0 <1.0.0`, for the
+  `isNotSupportedError` predicate on its `./sync` subpath.
+
 ## 0.3.0 - 2026-09-16
 
 ### Changed

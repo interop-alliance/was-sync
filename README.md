@@ -173,6 +173,13 @@ await controller.stop()
 different rates and a package default would silently change one app's background
 request rate.
 
+One failure ends a collection's replication rather than being retried: a write
+guarded by `If-Match` / `If-None-Match` against a collection whose backend
+advertises no `conditional-writes` is refused before it is sent, and no later
+attempt changes that. The controller cancels that collection, reports it as
+`error`, and leaves the rest of the session replicating. `isPermanentRefusal` is
+exported from `./rxdb` for an app that wants to recognize the same signal.
+
 ### Logging
 
 The package logs through a structural `Logger` port (four two-arg methods:

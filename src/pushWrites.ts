@@ -72,6 +72,20 @@
  * port it raises the not-found signal, and this handler reads both the same
  * way. Revoked access still surfaces on the next feed pull.
  *
+ * One push failure is permanent rather than transient: the sync port refuses a
+ * write carrying `If-Match` / `If-None-Match` with `NotSupportedError`, before
+ * any request, when the collection's backend advertises no `conditional-writes`
+ * (a client-registered external backend; every server-managed one advertises
+ * the token). A backend that does not advertise the feature will not start
+ * enforcing preconditions on a later attempt, so retrying the batch re-sends it
+ * forever and starves every other row behind it. This handler cannot stop a
+ * replication -- RxDB's push contract has no "give up" return and the handler
+ * holds no replication handle -- so it classifies the refusal, logs it at
+ * `error`, and rethrows it unchanged. `NotSupportedError` assigns its own
+ * `name`, which is what survives RxDB's serialization of a thrown handler error
+ * to plain JSON, so the controller's `isPermanentRefusal` finds it on `error$`
+ * and stops that collection.
+ *
  * RxDB's push contract asks only for *conflicts* back (the current primary state
  * of each rejected row), so a successful write's new `version` / `metaVersion`
  * (and the opaque `etag` / `metaEtag` validators behind them) is reported
@@ -85,6 +99,7 @@
  * -- no re-push loop.
  */
 import {
+  isNotSupportedError,
   isSyncAuthError,
   isSyncConflictError,
   isSyncNotFoundError
@@ -115,6 +130,31 @@ function isMetaNotFound(err: unknown): boolean {
     isSyncNotFoundError(err) ||
     (isSyncAuthError(err) && (err as { status?: unknown }).status === 404)
   )
+}
+
+/**
+ * Logs the one push failure a retry cannot fix, leaving the error itself
+ * untouched for the caller to rethrow: the guarded write the port refused
+ * before sending it, because the collection's backend advertises no
+ * `conditional-writes` (the header's permanent-refusal note). It is called on
+ * both write halves, so a refused `putContent`, `deleteContent`, or `putMeta`
+ * reads the same way, and it is a name match through was-client's predicate
+ * (invariant 5). Everything else this handler rethrows is transient by
+ * assumption and says nothing here, which is what makes the line worth reading.
+ *
+ * @param options {object}
+ * @param options.id {string}
+ * @param options.err {unknown}
+ * @returns {void}
+ */
+function notePermanentRefusal({ id, err }: { id: string; err: unknown }): void {
+  if (!isNotSupportedError(err)) {
+    return
+  }
+  log.error('Guarded write refused: the backend has no conditional-writes', {
+    id,
+    err
+  })
 }
 
 /**
@@ -362,8 +402,11 @@ async function pushRow({
     if (isSyncConflictError(err)) {
       return await conflictResult()
     }
-    // Any non-conflict error (network, 5xx, auth) propagates so RxDB retries
-    // the whole batch with backoff.
+    // Any other error propagates. A permanent refusal is noted on its way out
+    // (RxDB retries it like the rest; the controller is what stops the
+    // collection); everything else -- network, 5xx, auth -- is transient, and
+    // RxDB retries the whole batch with backoff.
+    notePermanentRefusal({ id, err })
     throw err
   }
 
@@ -418,6 +461,7 @@ async function pushRow({
         // The resource is alive and readable while its `/meta` write 404s:
         // the write itself was rejected, so the original signal stands.
       }
+      notePermanentRefusal({ id, err })
       throw err
     }
   }

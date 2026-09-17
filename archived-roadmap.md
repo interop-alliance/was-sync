@@ -323,3 +323,44 @@ once; and nothing pins it against drift. The prefix `sync` joins the namespace
 list in the logging package's README (`fw`, `wc`, `wr`, `dcw`). One seam
 replaces two, per the greenfield stance; consumers lose an option from each
 builder.
+
+### WS-15: Push retries a permanent `NotSupportedError` forever
+
+- status: done
+- done: 2026-09-16
+- priority: medium
+- labels: push, errors, was-client-port, conditional-writes
+- touches:
+  - was-client: the `isNotSupportedError` predicate added on the `./sync`
+    subpath (with the `NotSupportedError` class re-exported there), shipping in
+    0.67.0; its AGENTS/ARCHITECTURE files state the `err.name` rule generally
+    and needed no edit. The refusal itself shipped in 0.66.0: the sync port's
+    `putContent`, `deleteContent`, and `putMeta` throw `NotSupportedError`
+    before any request when they carry `ifMatch` / `ifNoneMatch` and the
+    collection's backend does not advertise `conditional-writes`.
+- acceptance:
+  - [x] `src/pushWrites.ts` classifies `NotSupportedError` (by `name`) as
+        permanent rather than letting it fall into the retry-with-backoff bucket
+  - [x] `src/controller.ts` stops the collection's replication on it and reports
+        the collection as `error` with the refusal as the cause
+  - [x] A test with a port that throws `NotSupportedError` on a guarded push
+        shows no retry
+
+Context: `pushWrites.ts` (around line 361) lets every non-conflict error
+propagate so RxDB retries the batch with backoff, and `controller.ts` only
+special-cases `WasSyncAuthError`. The new refusal is permanent: a backend that
+does not advertise `conditional-writes` will not start enforcing preconditions
+on a retry. Against the reference server every server-managed backend advertises
+the token, so only a client-registered external backend reaches this today.
+Decide whether a dedicated predicate on was-client's `./sync` subpath is wanted,
+or a local name check is enough.
+
+Settled: the predicate goes upstream, so invariant 5 holds unchanged and no
+was-client error-name string is hard-coded here. The push handler cannot stop a
+replication (RxDB's push contract has no "give up" return and the handler holds
+no replication handle), so it logs the refusal at `error` and rethrows it; the
+controller's `isPermanentRefusal` finds the name under RxDB's wrapping and
+releases that ONE collection, leaving its siblings replicating and the instance
+startable. Recorded as ARCHITECTURE.md invariant 17.
+
+discovered-from: was-client WCL-50.
