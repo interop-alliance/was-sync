@@ -1,5 +1,11 @@
 # @interop/was-sync Changelog
 
+## 0.5.1 - TBD
+
+### Changed
+
+- Update to latest di core 8.8.0.
+
 ## 0.5.0 - 2026-09-17
 
 ### Removed
