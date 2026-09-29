@@ -83,6 +83,15 @@
  * touches the revision/etag fields (never `data` / `updatedAt`), so the
  * follow-up push cycle it triggers finds nothing changed to write and settles
  * -- no re-push loop.
+ *
+ * Every content write, delete, and metadata write carries the injected
+ * `writerId`, when one was injected: the `Writer-Id` header on `PUT /:id` and
+ * `DELETE /:id`, and the body's top-level `writerId` member on `PUT /:id/meta`
+ * (the WAS writer-attribution label). The label is minted app-side; this
+ * handler never mints, persists, or derives one. The server's declare-or-clear
+ * rule means a write without it clears the stored label, so a replication run
+ * without a `writerId` attributes nothing rather than leaving a previous
+ * writer's label in place. The benign-412 delete re-issue declares it too.
  */
 import {
   isSyncAuthError,
@@ -194,6 +203,8 @@ function primaryOrTombstone({
  * @param [options.assumedMasterState] {WithDeleted<SyncedDoc>}
  * @param [options.cache] {PrimaryReadCache}   the push batch's shared
  *   primary-read memo
+ * @param [options.writerId] {string}   this writer's attribution label, sent
+ *   on every write and delete; absent sends none
  * @returns {Promise<{ conflict: WithDeleted<SyncedDoc> | null,
  *   ack: PushWriteAck | null }>}
  */
@@ -201,12 +212,14 @@ async function pushRow({
   port,
   newDocumentState,
   assumedMasterState,
-  cache
+  cache,
+  writerId
 }: {
   port: WasSyncPort
   newDocumentState: WithDeleted<SyncedDoc>
   assumedMasterState?: WithDeleted<SyncedDoc>
   cache?: PrimaryReadCache
+  writerId?: string
 }): Promise<{
   conflict: WithDeleted<SyncedDoc> | null
   ack: PushWriteAck | null
@@ -223,6 +236,8 @@ async function pushRow({
   const isCreate = assumedMasterState === undefined || assumedIsTombstone
   const deleteEtag = assumedIsTombstone ? undefined : assumedEtag
   const ack: PushWriteAck = { id }
+  // Spread into every write, so a replication run without a label sends none.
+  const attribution = writerId !== undefined ? { writerId } : {}
   const hasAck = () =>
     ack.version !== undefined || ack.metaVersion !== undefined
 
@@ -275,7 +290,7 @@ async function pushRow({
     ifMatch?: string
   }): Promise<WriteAck | undefined> => {
     try {
-      return await port.deleteContent(options)
+      return await port.deleteContent({ ...options, ...attribution })
     } catch (err) {
       if (isSyncNotFoundError(err)) {
         return undefined
@@ -351,7 +366,8 @@ async function pushRow({
         }),
         ...(isCreate
           ? { ifNoneMatch: true }
-          : assumedEtag !== undefined && { ifMatch: assumedEtag })
+          : assumedEtag !== undefined && { ifMatch: assumedEtag }),
+        ...attribution
       })
       ack.version = ackedContent.version
       if (ackedContent.etag !== undefined) {
@@ -385,7 +401,8 @@ async function pushRow({
         }),
         ...(assumedMetaVersion !== undefined
           ? assumedMetaEtag !== undefined && { ifMatch: assumedMetaEtag }
-          : { ifNoneMatch: true })
+          : { ifNoneMatch: true }),
+        ...attribution
       })
       if (ackedMeta !== undefined) {
         ack.metaVersion = ackedMeta.version
@@ -443,16 +460,24 @@ async function pushRow({
  * past every other conflicting row's primary on the way; without the memo a batch
  * with k conflicts would run k concurrent full-feed walks.
  *
- * @param port {WasSyncPort}
- * @param [onWriteAccepted] {(ack: PushWriteAck) => Promise<void>}
+ * @param options {object}
+ * @param options.port {WasSyncPort}
+ * @param [options.onWriteAccepted] {(ack: PushWriteAck) => Promise<void>}
+ * @param [options.writerId] {string}   this writer's attribution label, sent
+ *   on every content write, delete, and metadata write; absent sends none
  * @returns {(rows: Array<{ newDocumentState: WithDeleted<SyncedDoc>,
  *   assumedMasterState?: WithDeleted<SyncedDoc> }>) =>
  *   Promise<WithDeleted<SyncedDoc>[]>}
  */
-export function createPushHandler(
-  port: WasSyncPort,
+export function createPushHandler({
+  port,
+  onWriteAccepted,
+  writerId
+}: {
+  port: WasSyncPort
   onWriteAccepted?: (ack: PushWriteAck) => Promise<void>
-) {
+  writerId?: string
+}) {
   return async function push(
     rows: Array<{
       newDocumentState: WithDeleted<SyncedDoc>
@@ -466,7 +491,8 @@ export function createPushHandler(
           port,
           newDocumentState: row.newDocumentState,
           assumedMasterState: row.assumedMasterState,
-          cache
+          cache,
+          writerId
         })
         if (result.ack !== null && onWriteAccepted !== undefined) {
           await onWriteAccepted(result.ack)

@@ -262,6 +262,47 @@ describe('createSyncController lifecycle', () => {
     })
     await controller.stop()
   })
+
+  it('hands the injected writerId to every replication, and none when absent', async () => {
+    const cancelOrder: string[] = []
+    createWasReplication.mockImplementation(() =>
+      fakeReplication(cancelOrder, 'notes')
+    )
+    const build = (writerId?: string) =>
+      createSyncController({
+        port: {
+          wasClient,
+          spaceId: 'space-1',
+          serverUrl: 'https://was.example',
+          collections: [
+            { key: 'notes', id: 'notes' },
+            { key: 'tasks', id: 'tasks' }
+          ],
+          rxCollection: (() => fakeRxCollection()) as never
+        },
+        onStatus: () => {},
+        pollMs: 0,
+        ...(writerId !== undefined && { writerId })
+      })
+
+    const labeled = build('writer-a')
+    await labeled.start()
+    await labeled.stop()
+    const unlabeled = build()
+    await unlabeled.start()
+    await unlabeled.stop()
+
+    const options = createWasReplication.mock.calls.map(
+      call => call[0] as { writerId?: string }
+    )
+    expect(options.map(option => option.writerId)).toEqual([
+      'writer-a',
+      'writer-a',
+      undefined,
+      undefined
+    ])
+    expect('writerId' in options[2]!).toBe(false)
+  })
 })
 
 describe('createSyncController failed bring-up', () => {

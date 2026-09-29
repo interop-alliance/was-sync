@@ -203,8 +203,10 @@ export type SyncCheckpoint = ClientSyncCheckpoint
  * puller can pass one back verbatim as a conditional write's `ifMatch` without
  * a separate {@link WasSyncPort.get}. `epoch` is the opaque key-epoch id the
  * content body was encrypted under, and `createdBy` the server-managed creator
- * DID, both moved verbatim. was-client's own feed document type, aliased here
- * so the driver and the port agree by construction.
+ * DID, both moved verbatim. `writerId` is the writer-attribution label the
+ * revision was written under, when one was declared; the pull mapping does not
+ * carry it into the local row. was-client's own feed document type, aliased
+ * here so the driver and the port agree by construction.
  */
 export type WireDoc = ClientWireDoc
 
@@ -341,8 +343,10 @@ export interface WasSyncBasePort {
    * from a prior read/write, echoed back verbatim) for an update-if-unchanged.
    * `epoch` is the opaque key-epoch id the body was encrypted under, sent as
    * the `Key-Epoch` header (an absent epoch clears any prior stamp on the
-   * server, per the `key-epochs` feature). Returns the accepted write's
-   * {@link WriteAck}.
+   * server, per the `key-epochs` feature). `writerId` is the writing agent's
+   * attribution label, sent as the `Writer-Id` header; an absent `writerId`
+   * clears any stored label (the spec's declare-or-clear rule). Returns the
+   * accepted write's {@link WriteAck}.
    *
    * @param options {object}
    * @param options.id {string}
@@ -350,6 +354,7 @@ export interface WasSyncBasePort {
    * @param [options.ifMatch] {string}
    * @param [options.ifNoneMatch] {boolean}
    * @param [options.epoch] {string}
+   * @param [options.writerId] {string}
    * @returns {Promise<WriteAck>}
    */
   putContent(options: {
@@ -358,6 +363,7 @@ export interface WasSyncBasePort {
     ifMatch?: string
     ifNoneMatch?: boolean
     epoch?: string
+    writerId?: string
   }): Promise<WriteAck>
 
   /**
@@ -369,16 +375,20 @@ export interface WasSyncBasePort {
    * resource. A `404` may either resolve `undefined` or reject with the
    * not-found signal (`err.name === 'WasSyncNotFoundError'`); the push handler
    * reads both as the already-gone outcome, so neither port configuration of
-   * was-client wedges the batch on it.
+   * was-client wedges the batch on it. `writerId` declares the deleting
+   * agent's attribution label as the `Writer-Id` header, recorded on the
+   * tombstone; an absent one clears it.
    *
    * @param options {object}
    * @param options.id {string}
    * @param [options.ifMatch] {string}
+   * @param [options.writerId] {string}
    * @returns {Promise<WriteAck | undefined>}
    */
   deleteContent(options: {
     id: string
     ifMatch?: string
+    writerId?: string
   }): Promise<WriteAck | undefined>
 
   /**
@@ -395,13 +405,16 @@ export interface WasSyncBasePort {
    * the not-found signal (`err.name === 'WasSyncNotFoundError'`) on the default
    * port, or the auth signal carrying `status: 404` on a `mapAuthErrors` port;
    * the push handler corroborates either against the changes feed before
-   * treating it as a delete race.
+   * treating it as a delete race. `writerId` declares the writing agent's
+   * attribution label as the body's top-level `writerId` member; an absent one
+   * clears the stored label.
    *
    * @param options {object}
    * @param options.id {string}
    * @param [options.custom] {Json}   absent = write the cleared state
    * @param [options.ifMatch] {string}
    * @param [options.ifNoneMatch] {boolean}
+   * @param [options.writerId] {string}
    * @returns {Promise<WriteAck | undefined>}
    */
   putMeta(options: {
@@ -409,6 +422,7 @@ export interface WasSyncBasePort {
     custom?: Json
     ifMatch?: string
     ifNoneMatch?: boolean
+    writerId?: string
   }): Promise<WriteAck | undefined>
 }
 

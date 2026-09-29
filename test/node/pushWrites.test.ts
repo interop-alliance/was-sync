@@ -48,14 +48,16 @@ type WriteCall =
       ifMatch?: string
       ifNoneMatch?: boolean
       epoch?: string
+      writerId?: string
     }
-  | { kind: 'deleteContent'; id: string; ifMatch?: string }
+  | { kind: 'deleteContent'; id: string; ifMatch?: string; writerId?: string }
   | {
       kind: 'putMeta'
       id: string
       custom?: unknown
       ifMatch?: string
       ifNoneMatch?: boolean
+      writerId?: string
     }
 
 /**
@@ -153,7 +155,7 @@ function newDoc(over: Partial<WithDeleted<SyncedDoc>>): WithDeleted<SyncedDoc> {
 describe('createPushHandler routing', () => {
   it('creates content with If-None-Match when there is no assumed primary', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }
@@ -167,7 +169,7 @@ describe('createPushHandler routing', () => {
 
   it('creates content then metadata (content first) on a create with custom', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -190,7 +192,7 @@ describe('createPushHandler routing', () => {
 
   it('updates content with If-Match echoing the assumed etag when the body changed', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -210,7 +212,7 @@ describe('createPushHandler routing', () => {
 
   it('routes a metadata-only change to /meta with If-Match echoing the assumed metaEtag, no content write', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -242,7 +244,7 @@ describe('createPushHandler routing', () => {
 
   it('creates metadata with If-None-Match when the primary has no metaVersion yet', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -268,7 +270,7 @@ describe('createPushHandler routing', () => {
     // `bodiesEqual` is JCS-canonical, so a re-serialized body draws no spurious
     // `PUT` on either half.
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -292,7 +294,7 @@ describe('createPushHandler routing', () => {
 
   it('deletes with If-Match echoing the assumed etag and skips any metadata write', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -320,7 +322,7 @@ describe('createPushHandler routing', () => {
     // server's replace clears what the body omits), not be skipped -- otherwise
     // the removal never replicates.
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -348,7 +350,7 @@ describe('createPushHandler routing', () => {
 
   it('sends the row epoch on the content write, and nothing when it has none', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 }, epoch: 'e2' }) },
@@ -369,7 +371,7 @@ describe('createPushHandler routing', () => {
 
   it('sends the row epoch on an update write too', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await push([
       {
@@ -406,7 +408,7 @@ describe('createPushHandler conflicts', () => {
       conflictOn: { kind: 'putContent', id: 'r1' },
       primary
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }
@@ -432,7 +434,7 @@ describe('createPushHandler conflicts', () => {
       conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary: null
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -468,7 +470,7 @@ describe('createPushHandler conflicts', () => {
       conflictOn: { kind: 'putMeta', id: 'r1' },
       primary
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -507,7 +509,7 @@ describe('createPushHandler conflicts', () => {
       conflictOn: { kind: 'putContent', id: 'r1' },
       primary
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }
@@ -532,7 +534,7 @@ describe('createPushHandler conflicts', () => {
         epoch: 'e3'
       }
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 }, epoch: 'e2' }) }
@@ -555,7 +557,7 @@ describe('createPushHandler conflicts', () => {
         return null
       }
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await expect(
       push([{ newDocumentState: newDoc({ data: { a: 1 } }) }])
@@ -572,7 +574,7 @@ describe('createPushHandler conflicts', () => {
         data: { server: true }
       }
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'ok', data: { a: 1 } }) },
@@ -588,8 +590,11 @@ describe('createPushHandler write acks', () => {
   it('reports the acked content version on a create', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -603,8 +608,11 @@ describe('createPushHandler write acks', () => {
   it('uses the acked etag on the next update push (no 412 in steady state)', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     // Create: server acks version 1 + its etag; the caller writes it back
@@ -638,8 +646,11 @@ describe('createPushHandler write acks', () => {
   it('reports the acked metaVersion on a metadata write', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     await push([
@@ -659,8 +670,11 @@ describe('createPushHandler write acks', () => {
   it('does not report an ack for a delete whose response carries no ETag', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -680,8 +694,11 @@ describe('createPushHandler write acks', () => {
     // back later -- the next update push against this row sends no `If-Match`.
     const port = fakePushPort({ ackWrites: false })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
@@ -700,8 +717,11 @@ describe('createPushHandler write acks', () => {
       }
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -729,8 +749,11 @@ describe('createPushHandler write acks', () => {
       }
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -763,8 +786,11 @@ describe('createPushHandler tombstoned assumed primary', () => {
   it('re-creates with If-None-Match when the assumed primary is a tombstone', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -793,7 +819,7 @@ describe('createPushHandler tombstoned assumed primary', () => {
   it('re-creates a tombstone conflict entry that carries no etag', async () => {
     // The entry the plain port's null re-read produces: `version: 0`, no etag.
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -814,7 +840,7 @@ describe('createPushHandler tombstoned assumed primary', () => {
 
   it('deletes unconditionally when the assumed primary is a tombstone', async () => {
     const port = fakePushPort()
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -844,8 +870,11 @@ describe('createPushHandler metadata 404 corroboration', () => {
       primary: null
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -880,7 +909,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
         deleted: true
       }
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -910,7 +939,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
       auth404On: { kind: 'putMeta', id: 'r1' },
       getRejectsWith: new WasSyncAuthError(403)
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await expect(
       push([
@@ -937,8 +966,11 @@ describe('createPushHandler metadata 404 corroboration', () => {
       primary: null
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -1000,7 +1032,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
           data: { a: 1 }
         }
       })
-      const push = createPushHandler(port)
+      const push = createPushHandler({ port })
 
       await expect(
         push([
@@ -1078,7 +1110,7 @@ describe('createPushHandler batch primary re-reads', () => {
       feed: [feedDoc('r1', 9), feedDoc('r2', 4)],
       conflictContent: ['r1', 'r2']
     })
-    const push = createPushHandler(withFeedPrimaryRead(base))
+    const push = createPushHandler({ port: withFeedPrimaryRead(base) })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) },
@@ -1103,7 +1135,7 @@ describe('createPushHandler batch primary re-reads', () => {
       conflictContent: ['r1'],
       conflictMeta: ['r2']
     })
-    const push = createPushHandler(withFeedPrimaryRead(base))
+    const push = createPushHandler({ port: withFeedPrimaryRead(base) })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) },
@@ -1172,7 +1204,7 @@ describe('createPushHandler benign delete retry', () => {
     // echoed back yet), so the first conditional delete is refused. The body is
     // the same content under a drifted revision, so the delete is re-issued.
     const port = driftingDeletePort({ serverVersion: 1, serverData: { a: 1 } })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
     const capture = captureLogger('sync')
     const previous = setLogger(capture.logger)
 
@@ -1210,7 +1242,7 @@ describe('createPushHandler benign delete retry', () => {
       serverVersion: 1,
       serverData: { b: { d: 3, c: 2 }, a: 1 }
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1232,8 +1264,11 @@ describe('createPushHandler benign delete retry', () => {
     // write-back never lands leaves the local row on version 0. The delete that
     // follows sends the stale `If-Match` and is absorbed by the retry.
     const port = driftingDeletePort({ serverVersion: 1, serverData: { a: 1 } })
-    const push = createPushHandler(port, async () => {
-      throw new Error('write-back torn')
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async () => {
+        throw new Error('write-back torn')
+      }
     })
 
     await expect(
@@ -1265,7 +1300,7 @@ describe('createPushHandler benign delete retry', () => {
       conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1306,8 +1341,11 @@ describe('createPushHandler benign delete retry', () => {
       primary: { version: 2, updatedAt: '2026-02-02T00:00:00Z', data: { a: 1 } }
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     try {
@@ -1351,8 +1389,11 @@ describe('createPushHandler delete of an absent resource', () => {
       notFoundOn: { kind: 'deleteContent', id: 'gone-remotely' }
     })
     const acks: PushWriteAck[] = []
-    const push = createPushHandler(port, async ack => {
-      acks.push(ack)
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
     })
 
     const conflicts = await push([
@@ -1391,7 +1432,7 @@ describe('createPushHandler delete of an absent resource', () => {
     const port = fakePushPort({
       notFoundOn: { kind: 'deleteContent', id: 'r1' }
     })
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1442,7 +1483,7 @@ describe('createPushHandler delete of an absent resource', () => {
         }
       }
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1467,7 +1508,7 @@ describe('createPushHandler delete of an absent resource', () => {
       port.writes.push({ kind: 'deleteContent', ...deleteOptions })
       throw { name: 'WasSyncNotFoundError', message: 'foreign 404' }
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1492,7 +1533,7 @@ describe('createPushHandler delete of an absent resource', () => {
     port.deleteContent = async () => {
       throw new Error('network down')
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     await expect(
       push([
@@ -1544,7 +1585,7 @@ describe('createPushHandler typed signals from another copy', () => {
         }
       }
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       { newDocumentState: newDoc({ data: { a: 1 } }) }
@@ -1579,7 +1620,7 @@ describe('createPushHandler typed signals from another copy', () => {
         return null
       }
     }
-    const push = createPushHandler(port)
+    const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
@@ -1602,5 +1643,177 @@ describe('createPushHandler typed signals from another copy', () => {
         _deleted: true
       }
     ])
+  })
+})
+
+describe('createPushHandler writer attribution', () => {
+  const writerId = 'writer-a'
+
+  it('declares the writerId on a content create and its metadata write', async () => {
+    const port = fakePushPort()
+    const push = createPushHandler({ port, writerId })
+
+    await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          data: { a: 1 },
+          custom: { jwe: 'x' }
+        })
+      }
+    ])
+
+    expect(port.writes).toEqual([
+      {
+        kind: 'putContent',
+        id: 'r1',
+        data: { a: 1 },
+        ifNoneMatch: true,
+        writerId
+      },
+      {
+        kind: 'putMeta',
+        id: 'r1',
+        custom: { jwe: 'x' },
+        ifNoneMatch: true,
+        writerId
+      }
+    ])
+  })
+
+  it('declares the writerId on a content update and a metadata clear', async () => {
+    const port = fakePushPort()
+    const push = createPushHandler({ port, writerId })
+
+    await push([
+      {
+        assumedMasterState: newDoc({
+          version: 2,
+          etag: etagFor(2),
+          data: { a: 1 },
+          metaVersion: 1,
+          metaEtag: etagFor(1),
+          custom: { jwe: 'x' }
+        }),
+        newDocumentState: newDoc({ version: 2, data: { a: 2 } })
+      }
+    ])
+
+    expect(port.writes).toEqual([
+      {
+        kind: 'putContent',
+        id: 'r1',
+        data: { a: 2 },
+        ifMatch: etagFor(2),
+        writerId
+      },
+      { kind: 'putMeta', id: 'r1', ifMatch: etagFor(1), writerId }
+    ])
+  })
+
+  it('declares the writerId on a delete', async () => {
+    const port = fakePushPort()
+    const push = createPushHandler({ port, writerId })
+
+    await push([
+      {
+        assumedMasterState: newDoc({
+          version: 3,
+          etag: etagFor(3),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ version: 3, data: { a: 1 }, _deleted: true })
+      }
+    ])
+
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(3), writerId }
+    ])
+  })
+
+  it('declares the writerId on the benign-412 delete re-issue too', async () => {
+    const deletes: Array<{ ifMatch?: string; writerId?: string }> = []
+    const port: WasSyncPort = {
+      async query() {
+        return { documents: [], checkpoint: null }
+      },
+      async putContent() {
+        return { version: 1 }
+      },
+      async deleteContent({ ifMatch, writerId: declared }) {
+        deletes.push({ ifMatch, writerId: declared })
+        if (ifMatch !== etagFor(2)) {
+          throw new WasSyncConflictError()
+        }
+        return undefined
+      },
+      async putMeta() {
+        return undefined
+      },
+      async get() {
+        return {
+          version: 2,
+          etag: etagFor(2),
+          updatedAt: '2026-02-02T00:00:00Z',
+          data: { a: 1 }
+        }
+      }
+    }
+    const push = createPushHandler({ port, writerId })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ version: 1, data: { a: 1 }, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(deletes).toEqual([
+      { ifMatch: etagFor(1), writerId },
+      { ifMatch: etagFor(2), writerId }
+    ])
+  })
+
+  it('declares no label on any write when no writerId was injected', async () => {
+    const port = fakePushPort()
+    const push = createPushHandler({ port })
+
+    await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          data: { a: 1 },
+          custom: { jwe: 'x' }
+        })
+      },
+      {
+        assumedMasterState: newDoc({
+          id: 'r2',
+          version: 1,
+          etag: etagFor(1),
+          data: { b: 1 }
+        }),
+        newDocumentState: newDoc({
+          id: 'r2',
+          version: 1,
+          data: { b: 1 },
+          _deleted: true
+        })
+      }
+    ])
+
+    expect(port.writes.map(write => write.kind).sort()).toEqual([
+      'deleteContent',
+      'putContent',
+      'putMeta'
+    ])
+    for (const write of port.writes) {
+      expect('writerId' in write).toBe(false)
+    }
   })
 })

@@ -88,6 +88,17 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
  * @param [options.live] {boolean}        ongoing (default true) vs one-shot
  * @param [options.autoStart] {boolean}   start immediately (default true)
  * @param [options.deletedField] {string} RxDB deleted flag (default `_deleted`)
+ * @param [options.writerId] {string}    this replica's writer-attribution
+ *   label (the WAS `writerId`), minted and kept app-side. The driver never
+ *   mints, persists, or derives one. When present, every content write and
+ *   delete declares it as the `Writer-Id` header and every metadata write as
+ *   the body's `writerId` member. When absent, pushes declare no label, which
+ *   clears any stored one under the server's declare-or-clear rule. A session
+ *   that must not reveal a stable label to the host leaves it absent or passes
+ *   a per-session one. The pull side does not read it: the pull handler
+ *   decrypts nothing (bodies are opaque), so a replica's own echo has no
+ *   decrypt to skip, and RxDB writes a pulled state into the local row only
+ *   where the collection's `isEqual` says it differs.
  * @returns {RxReplicationState<SyncedDoc, SyncCheckpoint>}
  */
 export function createWasReplication({
@@ -98,7 +109,8 @@ export function createWasReplication({
   retryTime,
   live = true,
   autoStart = true,
-  deletedField = '_deleted'
+  deletedField = '_deleted',
+  writerId
 }: {
   rxCollection: RxCollection<SyncedDoc>
   wasPort: WasSyncPort
@@ -108,6 +120,7 @@ export function createWasReplication({
   live?: boolean
   autoStart?: boolean
   deletedField?: string
+  writerId?: string
 }): RxReplicationState<SyncedDoc, SyncCheckpoint> {
   return replicateRxCollection<SyncedDoc, SyncCheckpoint>({
     replicationIdentifier,
@@ -121,7 +134,11 @@ export function createWasReplication({
       batchSize
     },
     push: {
-      handler: createPushHandler(wasPort, createAckWriteBack(rxCollection)),
+      handler: createPushHandler({
+        port: wasPort,
+        onWriteAccepted: createAckWriteBack(rxCollection),
+        ...(writerId !== undefined && { writerId })
+      }),
       batchSize
     }
   })

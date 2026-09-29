@@ -236,6 +236,22 @@ numbered so items and reviews can cite them.
     for a chunked envelope read with the context that fetches the chunks, which
     this resolver never supplies, and a closure that returns one anyway is
     scored `undecryptable` rather than `none` so the write is not silently lost.
+17. **Pushes declare the injected writer id, or none.** The replication takes an
+    optional `writerId` (`createWasReplication`, `createSyncController`) and the
+    push handler declares it on every write it issues: the `Writer-Id` header on
+    a content write and a delete (the benign-412 re-issue included), and the
+    body's `writerId` member on a `/meta` write. With none injected, no write
+    declares one, and the server's declare-or-clear rule clears the stored
+    label. The driver never mints, persists, or derives the label; the app does
+    (`getWriterId` is its helper, invariant 8). The pull side does not read it.
+    The pull handler decrypts nothing (invariant 1), so a replica's own echo has
+    no decrypt to skip, and RxDB writes a pulled state into the local row only
+    where the collection's `isEqual` says it differs. The feed's `writerId` is
+    not carried into the local row either, since the replica schema has no
+    member for it (invariant 7). The replica-less engine in
+    `@interop/wallet-core/sync` stamps pushes the same way and additionally
+    skips the decrypt of an own-writer echo whose `etag` its store confirms it
+    holds; the two converge on the same server state either way.
 
 ## Ownership heuristics
 
@@ -304,8 +320,9 @@ the byoe-ecosystem layer map instead.
   write's `If-Match` echoes what the server holds. Avoid: receipt, confirmation.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a revision; it attributes history and breaks last-write-wins
-  ties. Avoid: device id, replica id, client id (a client id is keyed and
-  custodied; this is neither).
+  ties. On the wire it is the WAS `writerId`, which the push handler declares
+  when the app injects one (invariant 17). Avoid: device id, replica id, client
+  id (a client id is keyed and custodied; this is neither).
 - **Key epoch** -- the opaque id of the key a stored envelope was encrypted
   under, carried verbatim on `SyncedDoc.epoch` and stamped on the content push.
   The driver never interprets it. Avoid: key version, epoch key.

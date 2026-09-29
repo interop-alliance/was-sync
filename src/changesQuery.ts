@@ -29,7 +29,9 @@ import { copyOptionalBodyFields } from './types.js'
  * likewise; each is simply absent when the server holds none. The opaque `etag`
  * / `metaEtag` validators are carried across the same way, so a later push can
  * echo one back verbatim as `ifMatch` without a separate re-read. `_deleted`
- * becomes RxDB's native deleted flag.
+ * becomes RxDB's native deleted flag. The feed's `writerId` label is not
+ * carried across: the replica schema has no member for it, so a labeled and an
+ * unlabeled revision map to the same row.
  *
  * @param doc {WireDoc}
  * @returns {WithDeleted<SyncedDoc>}

@@ -173,6 +173,13 @@ export function isAuthError(err: unknown): boolean {
  * @param [options.schedule] {SyncSchedule}
  * @param [options.onlineSource] {SyncOnlineSource}
  * @param options.pollMs {number}                     0 disables the poll timer
+ * @param [options.writerId] {string}   this replica's writer-attribution label
+ *   (the WAS `writerId`), minted and kept app-side (the root entry's `getWriterId`
+ *   for a helper); the driver never mints, persists, or derives one. When
+ *   present, every push in every collection declares it. When absent, pushes
+ *   declare no label, which clears any stored one under the server's
+ *   declare-or-clear rule. A session that must not reveal a stable label to
+ *   the host leaves it absent or passes a per-session one.
  * @returns {SyncController}
  */
 export function createSyncController({
@@ -182,7 +189,8 @@ export function createSyncController({
   onRemoteChange,
   schedule = defaultSchedule,
   onlineSource,
-  pollMs
+  pollMs,
+  writerId
 }: {
   port: {
     wasClient: WasClient
@@ -202,6 +210,7 @@ export function createSyncController({
   schedule?: SyncSchedule
   onlineSource?: SyncOnlineSource
   pollMs: number
+  writerId?: string
 }): SyncController {
   const replications: Array<{
     state: RxReplicationState<SyncedDoc, SyncCheckpoint>
@@ -309,7 +318,8 @@ export function createSyncController({
           wasPort,
           replicationIdentifier: identifierFor({ collectionId: id }),
           ...(port.batchSize !== undefined && { batchSize: port.batchSize }),
-          ...(port.retryTime !== undefined && { retryTime: port.retryTime })
+          ...(port.retryTime !== undefined && { retryTime: port.retryTime }),
+          ...(writerId !== undefined && { writerId })
         })
         // Registered BEFORE anything is subscribed: `createWasReplication`
         // defaults to `autoStart`, so a throw between construction and

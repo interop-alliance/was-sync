@@ -173,6 +173,15 @@ await controller.stop()
 different rates and a package default would silently change one app's background
 request rate.
 
+An optional `writerId` (also accepted by `createWasReplication`) is the WAS
+writer-attribution label. When it is set, every content write and delete
+declares it as the `Writer-Id` header and every metadata write as the body's
+`writerId` member. When it is absent, pushes declare none, which clears any
+stored label on the server. The app mints and keeps the label (`getWriterId` is
+a helper for that); a session that must not reveal a stable label to the host
+leaves it absent or passes a per-session one. The label is advisory and never an
+identity.
+
 ### Logging
 
 The package logs through a structural `Logger` port (four two-arg methods:

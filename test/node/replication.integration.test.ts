@@ -878,4 +878,156 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
 
     await replication.cancel()
   })
+
+  it('declares the injected writerId on every push, and a mixed feed converges the same with and without one', async () => {
+    const { port, observer } = await openServerCollection()
+    // A foreign-labeled revision, an unlabeled one, and a tombstone, all
+    // written by another writer.
+    await observer.putContent({
+      id: 'cid-foreign',
+      data: { from: 'foreign' },
+      writerId: 'writer-b'
+    })
+    await observer.putContent({ id: 'cid-unlabeled', data: { from: 'none' } })
+    const doomed = await observer.putContent({
+      id: 'cid-gone',
+      data: { from: 'doomed' },
+      writerId: 'writer-b'
+    })
+    await observer.deleteContent({
+      id: 'cid-gone',
+      ifMatch: doomed.etag,
+      writerId: 'writer-b'
+    })
+
+    // Replica A writes under its own label and replicates its own echo back.
+    const declared: Array<{ kind: string; writerId?: string }> = []
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      declared.push({ kind: 'putContent', writerId: options.writerId })
+      return rawPut(options)
+    }
+    const rawPutMeta = port.putMeta.bind(port)
+    port.putMeta = async options => {
+      declared.push({ kind: 'putMeta', writerId: options.writerId })
+      return rawPutMeta(options)
+    }
+    const rawDelete = port.deleteContent.bind(port)
+    port.deleteContent = async options => {
+      declared.push({ kind: 'deleteContent', writerId: options.writerId })
+      return rawDelete(options)
+    }
+    const replicaA = await openCollection()
+    const replicationA = createWasReplication({
+      rxCollection: replicaA,
+      wasPort: port,
+      replicationIdentifier: 'test-writer-a',
+      writerId: 'writer-a'
+    })
+    await replicationA.awaitInitialReplication()
+    await replicaA.insert({
+      id: 'cid-own',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { from: 'own' },
+      custom: { name: 'mine' }
+    })
+    await replicaA.insert({
+      id: 'cid-own-gone',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { from: 'own-doomed' }
+    })
+    await eventually(
+      async () =>
+        committed(await observer.get({ id: 'cid-own' })) &&
+        committed(await observer.get({ id: 'cid-own-gone' })),
+      () => replicationA.reSync()
+    )
+    // Wait for the ack write-back before deleting, so the delete carries the
+    // server's validator.
+    await eventually(
+      async () =>
+        (await replicaA.findOne('cid-own-gone').exec())?.get('etag') !==
+        undefined,
+      () => replicationA.reSync()
+    )
+    await (await replicaA.findOne('cid-own-gone').exec())?.remove()
+    await eventually(
+      async () => (await observer.get({ id: 'cid-own-gone' })) === null,
+      () => replicationA.reSync()
+    )
+    // A's own echoes come back down the feed before it stops.
+    replicationA.reSync()
+    await replicationA.awaitInSync()
+    await replicationA.cancel()
+    const replicaAState = (await replicaA.find().exec())
+      .map(doc => doc.toJSON())
+      .sort((left, right) => left.id.localeCompare(right.id))
+
+    expect(declared.map(write => write.kind).sort()).toEqual([
+      'deleteContent',
+      'putContent',
+      'putContent',
+      'putMeta'
+    ])
+    for (const write of declared) {
+      expect(write.writerId).toBe('writer-a')
+    }
+
+    // Two fresh replicas pull the same feed: one under A's label (which
+    // holds none of those revisions), one under none.
+    const snapshot = async (writerId?: string) => {
+      const database = await createRxDatabase({
+        name: 'writertest' + Math.random().toString(36).slice(2),
+        storage: getRxStorageMemory(),
+        multiInstance: false
+      })
+      try {
+        const { synced } = await database.addCollections({
+          synced: { schema: syncedDocSchema() }
+        })
+        const replication = createWasReplication({
+          rxCollection: synced,
+          wasPort: createWasSyncPort({
+            was,
+            spaceId,
+            collectionId: `synced-${collectionSerial}`
+          }),
+          replicationIdentifier: `test-writer-${writerId ?? 'none'}`,
+          ...(writerId !== undefined && { writerId })
+        })
+        await replication.awaitInitialReplication()
+        await replication.cancel()
+        const docs = await synced.find().exec()
+        return docs
+          .map(doc => doc.toJSON())
+          .sort((left, right) => left.id.localeCompare(right.id))
+      } finally {
+        await database.close()
+      }
+    }
+    const withLabel = await snapshot('writer-a')
+    const withoutLabel = await snapshot()
+
+    expect(withLabel.map(doc => doc.id)).toEqual([
+      'cid-foreign',
+      'cid-own',
+      'cid-unlabeled'
+    ])
+    expect(withLabel).toEqual(withoutLabel)
+    // The writer's own replica agrees on every revision it replicated. Its
+    // own rows keep the local `updatedAt` and learn no `createdBy` from their
+    // echo, since the ack write-back already settled them, so those two are
+    // left out of the comparison.
+    const revisionOf = ({
+      updatedAt: _updatedAt,
+      createdBy: _createdBy,
+      ...rest
+    }: Record<string, unknown>) => rest
+    expect(replicaAState.map(revisionOf)).toEqual(withLabel.map(revisionOf))
+    for (const doc of withLabel) {
+      expect('writerId' in doc).toBe(false)
+    }
+  })
 })

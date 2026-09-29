@@ -76,6 +76,15 @@ this and overrides `isEqual` with deepEqual
 No current test asserts `createdBy` on a locally created row, and the fake
 server never assigns one (see WS-11).
 
+2026-09-28: seen again while adding writerId push stamping. The mixed-feed
+convergence case in `test/node/replication.integration.test.ts`, run against the
+live server, compares the writing replica on every field except `updatedAt` and
+`createdBy`, with a comment saying why. That exclusion is the check to remove
+when this lands. The observation there named the ack write-back as the cause: it
+is a local write, so the echo lands behind a push cycle with nothing to send
+while the checkpoint moves on. Confirm which of the two mechanisms (that one, or
+the `isEqual` skip above) actually drops the fields before fixing.
+
 ### WS-7: Ack write-back accepts version 0
 
 - status: todo

@@ -1,5 +1,25 @@
 # @interop/was-sync Changelog
 
+## 0.6.0 - TBD
+
+### Added
+
+- WAS writer attribution on push. `createWasReplication` and
+  `createSyncController` take an optional app-minted `writerId`. When set, every
+  content write and delete sends it as the `Writer-Id` header and every metadata
+  write as the body's `writerId` member. When absent, no label is sent, which
+  clears any stored one. The pull side does not read it, and the feed's
+  `writerId` is not stored in the local row.
+- `WasSyncPort.putContent` / `deleteContent` / `putMeta` take an optional
+  `writerId`, matching was-client's port.
+
+### Changed
+
+- BREAKING: `createPushHandler` takes one options object,
+  `{ port, onWriteAccepted?, writerId? }`, in place of positional arguments.
+- The `@interop/was-client` peer range is now `>=0.79.0`, the first release
+  whose sync port sends `writerId`.
+
 ## 0.5.1 - 2026-09-25
 
 ### Changed

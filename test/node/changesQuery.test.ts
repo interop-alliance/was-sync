@@ -199,6 +199,28 @@ describe('wireDocToRxDoc', () => {
     expect('data' in rx).toBe(false)
     expect('custom' in rx).toBe(false)
   })
+
+  it('does not carry the writerId into the local row, live or tombstone', () => {
+    const live: WireDoc = {
+      id: 'abc',
+      _deleted: false,
+      updatedAt: '2026-01-01T00:00:00Z',
+      version: 2,
+      etag: '"e2"',
+      data: { hello: 'world' }
+    }
+    const tombstone: WireDoc = {
+      id: 'gone',
+      _deleted: true,
+      updatedAt: '2026-01-02T00:00:00Z',
+      version: 3
+    }
+    for (const doc of [live, tombstone]) {
+      const stamped = wireDocToRxDoc({ ...doc, writerId: 'writer-a' })
+      expect(stamped).toEqual(wireDocToRxDoc(doc))
+      expect('writerId' in stamped).toBe(false)
+    }
+  })
 })
 
 describe('createPullHandler', () => {
