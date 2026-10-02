@@ -8,6 +8,7 @@
  * epoch?, createdBy?, etag?, metaEtag? }`) into an RxDB `WithDeleted<SyncedDoc>`,
  * and applies the empty-page `checkpoint: null` rule.
  */
+import { isSyncCheckpointError } from '@interop/was-client/sync'
 import type {
   ReplicationCheckpoint,
   SyncCheckpoint,
@@ -64,9 +65,9 @@ export function wireDocToRxDoc(doc: WireDoc): WithDeleted<SyncedDoc> {
  * too.
  *
  * The checkpoint is opaque, passed back verbatim. A server refuses a
- * checkpoint it did not issue (a replica created against another server) with
- * `invalid-request-body` (400) at `#/checkpoint`. The handler then pulls again
- * from the beginning, which is safe because the apply path is keyed by
+ * checkpoint it did not issue (a replica created against another server), and
+ * the port raises that as its refused-checkpoint signal (matched by
+ * `isSyncCheckpointError`). The handler then pulls again from the beginning, which is safe because the apply path is keyed by
  * resource id. RxDB persists a checkpoint only with a non-empty page, so when
  * the restarted feed is empty the refused checkpoint stays stored and RxDB
  * offers it again on the next poll; the handler remembers the refusal and
@@ -101,7 +102,7 @@ export function createPullHandler(port: WasSyncPort) {
     try {
       response = await fetchPage(resumeFrom)
     } catch (err) {
-      if (resumeFrom === undefined || !isRejectedCheckpoint(err)) {
+      if (resumeFrom === undefined || !isSyncCheckpointError(err)) {
         throw err
       }
       // The server did not issue this checkpoint: restart the feed, and do
@@ -119,34 +120,4 @@ export function createPullHandler(port: WasSyncPort) {
       checkpoint: next === undefined ? undefined : { checkpoint: next }
     }
   }
-}
-
-/**
- * Whether a failed `changes` pull is the server refusing the supplied
- * checkpoint: a 400 whose problem type is `invalid-request-body` and whose
- * problems point at `#/checkpoint`. A 400 of the same type that points
- * elsewhere (an unaccepted `profile`, say) is not a checkpoint refusal and is
- * rethrown as is.
- *
- * @param err {unknown}
- * @returns {boolean}
- */
-function isRejectedCheckpoint(err: unknown): boolean {
-  if (err === null || typeof err !== 'object') {
-    return false
-  }
-  const { status, type, problems } = err as {
-    status?: unknown
-    type?: unknown
-    problems?: unknown
-  }
-  return (
-    status === 400 &&
-    typeof type === 'string' &&
-    type.endsWith('#invalid-request-body') &&
-    Array.isArray(problems) &&
-    problems.some(
-      problem => (problem as { pointer?: unknown })?.pointer === '#/checkpoint'
-    )
-  )
 }

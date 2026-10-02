@@ -21,11 +21,11 @@ change that puts an `rxdb` import (a type import included) anywhere the root
 entry reaches breaks the contract, and `test/packaging/` is what catches it.
 
 What does NOT belong here: WAS HTTP, the sync port, the wire vocabulary, the
-error classes, and the four `err.name` predicates (`@interop/was-client`, its
-`/sync` subpath); the last-write-wins comparison rule (`@interop/social-core`);
-ciphers, key epochs, and any other key handling (`@interop/was-client/edv` and
-each consuming app); the session gates, the status store, and the platform
-wiring (each app's binding); and the replica-less change engine
+error classes, and the `err.name` predicates (`@interop/was-client`, its `/sync`
+subpath); the last-write-wins comparison rule (`@interop/social-core`); ciphers,
+key epochs, and any other key handling (`@interop/was-client/edv` and each
+consuming app); the session gates, the status store, and the platform wiring
+(each app's binding); and the replica-less change engine
 (`@interop/wallet-core/sync`), which is this driver's sibling rather than its
 other half.
 
@@ -266,7 +266,7 @@ rather than memory; check with the user before editing anything in them.
 
 - [was-client](https://github.com/interop-alliance/was-client) -- the WAS HTTP
   client, the sync port this driver runs on, the wire vocabulary, the error
-  classes, and the four `err.name` predicates.
+  classes, and the `err.name` predicates.
 - [was-react](https://github.com/interop-alliance/was-react) and the Freewallet
   browser wallet -- the two consumers, and the two copies this package was
   merged from.

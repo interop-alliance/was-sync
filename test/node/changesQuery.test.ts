@@ -6,6 +6,7 @@
  * and pull handler), driven by a fake WAS port -- no server, no RxDB engine.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { WasSyncCheckpointError } from '@interop/was-client/sync'
 import { createPullHandler, wireDocToRxDoc } from '../../src/changesQuery.js'
 import type { SyncCheckpoint, WasSyncPort, WireDoc } from '../../src/types.js'
 
@@ -246,17 +247,7 @@ describe('createPullHandler', () => {
     version: 1,
     checkpoint
   })
-  const rejected = Object.assign(new Error('bad checkpoint'), {
-    status: 400,
-    type: 'https://w3id.org/pws#invalid-request-body',
-    problems: [
-      {
-        detail:
-          'The checkpoint was not issued by this server for this Collection.',
-        pointer: '#/checkpoint'
-      }
-    ]
-  })
+  const rejected = new WasSyncCheckpointError()
 
   /**
    * A port that refuses every pull carrying a checkpoint and serves the one
@@ -370,25 +361,33 @@ describe('createPullHandler', () => {
     expect(port.calls[2]).toEqual({ limit: 100 })
   })
 
-  it('rethrows an invalid-request-body 400 that does not point at the checkpoint', async () => {
+  it('matches the refusal by name, as from another copy of was-client', async () => {
+    const foreign = Object.assign(new Error('refused elsewhere'), {
+      name: 'WasSyncCheckpointError'
+    })
     const port = {
-      async query() {
-        throw Object.assign(new Error('bad profile'), {
-          status: 400,
-          type: 'https://w3id.org/pws#invalid-request-body',
-          problems: [{ detail: 'Unknown profile.', pointer: '#/profile' }]
-        })
+      calls: [] as Array<{ checkpoint?: SyncCheckpoint; limit: number }>,
+      async query(options: { checkpoint?: SyncCheckpoint; limit: number }) {
+        port.calls.push(options)
+        if (options.checkpoint !== undefined) {
+          throw foreign
+        }
+        return { documents: [], checkpoint: null }
       }
-    } as unknown as WasSyncPort
-    const pull = createPullHandler(port)
+    }
+    const pull = createPullHandler(port as unknown as WasSyncPort)
 
-    await expect(pull({ checkpoint: cpA }, 100)).rejects.toThrow('bad profile')
+    await pull({ checkpoint: cpA }, 100)
+    expect(port.calls).toEqual([
+      { checkpoint: cpA, limit: 100 },
+      { limit: 100 }
+    ])
   })
 
   it('rethrows any other pull failure', async () => {
     const port = {
       async query() {
-        throw Object.assign(new Error('nope'), { status: 500 })
+        throw Object.assign(new Error('nope'), { status: 400 })
       }
     } as unknown as WasSyncPort
     const pull = createPullHandler(port)
