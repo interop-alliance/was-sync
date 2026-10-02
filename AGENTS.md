@@ -66,11 +66,14 @@ Do not add test files to `tsconfig.json` — they would be emitted into `dist/`.
 
 - `test/node/` — Vitest unit tests (`pnpm run test:node`); run in Node, with no
   DOM anywhere. The push, pull, conflict, and feed-read suites drive fake ports;
-  the integration suite drives a real RxDB memory-storage collection against a
-  live in-process `was-teaching-server`, over the real `createWasSyncPort` from
-  `@interop/was-client` on its default configuration, with one plaintext
-  collection provisioned per test; the controller suite mocks
-  `wasReplication.js`, so it exercises the lifecycle without opening a database.
+  the checkpoint suite drives a real RxDB memory-storage collection against a
+  fake port issuing opaque string checkpoints, since RxDB's checkpoint stacking
+  is the layer that would mangle them; the integration suite drives a real RxDB
+  memory-storage collection against a live in-process `was-teaching-server`,
+  over the real `createWasSyncPort` from `@interop/was-client` on its default
+  configuration, with one plaintext collection provisioned per test; the
+  controller suite mocks `wasReplication.js`, so it exercises the lifecycle
+  without opening a database.
 - `test/packaging/` — the packaging suite (`pnpm run test:packaging`, which
   builds first and runs under `vitest.packaging.config.ts`). It walks the
   emitted module and declaration graphs to hold the root entry free of `rxdb`

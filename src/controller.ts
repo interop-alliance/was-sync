@@ -37,7 +37,7 @@ import {
   isSyncAuthError,
   type SyncStatus
 } from '@interop/was-client/sync'
-import type { SyncCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
+import type { ReplicationCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
 import { log } from './log.js'
 import { createWasReplication } from './wasReplication.js'
 import { withFeedPrimaryRead } from './feedPrimaryPort.js'
@@ -213,7 +213,7 @@ export function createSyncController({
   writerId?: string
 }): SyncController {
   const replications: Array<{
-    state: RxReplicationState<SyncedDoc, SyncCheckpoint>
+    state: RxReplicationState<SyncedDoc, ReplicationCheckpoint>
     subscriptions: Unsubscribable[]
   }> = []
   // A capability-less entry is only suspicious when its siblings carry one.

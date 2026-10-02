@@ -1,5 +1,25 @@
 # @interop/was-sync Changelog
 
+## 0.7.0 - TBD
+
+### Changed
+
+- **BREAKING**: `SyncCheckpoint` follows was-client's opaque string checkpoint,
+  replacing the `{ id, updatedAt }` object. The RxDB checkpoint record is the
+  new `ReplicationCheckpoint`, `{ checkpoint: SyncCheckpoint }`: RxDB stacks
+  checkpoints with `Object.assign`, which would scatter a bare string, so the
+  pull handler wraps the string for RxDB and unwraps it for the port. A replica
+  persisted with the retired object record reads as no checkpoint and pulls from
+  the beginning. `createWasReplication` returns
+  `RxReplicationState<SyncedDoc, ReplicationCheckpoint>`. Requires
+  `@interop/was-client` 0.84.0 or later.
+- The pull handler restarts the feed from the beginning when the server refuses
+  the stored checkpoint with `invalid-request-body` (400) at `#/checkpoint`, as
+  for a checkpoint issued by another server. A 400 of that type pointing
+  elsewhere is rethrown. The refused checkpoint is remembered for the life of
+  the handler, so an empty restarted feed (which RxDB does not persist a
+  checkpoint for) costs the 400 round trip once rather than once per poll.
+
 ## 0.6.0 - 2026-09-28
 
 ### Added

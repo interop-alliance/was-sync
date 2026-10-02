@@ -41,6 +41,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       data: { hello: 'world' }
     }
@@ -58,6 +59,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       metaVersion: 2,
       data: { hello: 'world' },
@@ -79,6 +81,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       data: { hello: 'world' },
       epoch: 'e2'
@@ -88,6 +91,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       data: { hello: 'world' }
     })
@@ -99,6 +103,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       createdBy: 'did:key:z6MkCreator',
       data: { hello: 'world' }
@@ -118,6 +123,7 @@ describe('wireDocToRxDoc', () => {
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
+      checkpoint: 'cp',
       version: 4,
       createdBy: 'did:key:z6MkCreator'
     }
@@ -138,6 +144,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       metaVersion: 2,
       data: { hello: 'world' },
@@ -163,6 +170,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       data: { hello: 'world' }
     }
@@ -176,6 +184,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 3,
       data: { hello: 'world' }
     }
@@ -187,6 +196,7 @@ describe('wireDocToRxDoc', () => {
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
+      checkpoint: 'cp',
       version: 4
     }
     const rx = wireDocToRxDoc(doc)
@@ -205,6 +215,7 @@ describe('wireDocToRxDoc', () => {
       id: 'abc',
       _deleted: false,
       updatedAt: '2026-01-01T00:00:00Z',
+      checkpoint: 'cp',
       version: 2,
       etag: '"e2"',
       data: { hello: 'world' }
@@ -213,6 +224,7 @@ describe('wireDocToRxDoc', () => {
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
+      checkpoint: 'cp',
       version: 3
     }
     for (const doc of [live, tombstone]) {
@@ -224,15 +236,59 @@ describe('wireDocToRxDoc', () => {
 })
 
 describe('createPullHandler', () => {
-  const cpA: SyncCheckpoint = { id: 'a', updatedAt: '2026-01-01T00:00:01Z' }
-  const cpB: SyncCheckpoint = { id: 'b', updatedAt: '2026-01-01T00:00:02Z' }
+  const cpA: SyncCheckpoint = 'opaque-checkpoint-a'
+  const cpB: SyncCheckpoint = 'opaque-checkpoint-b'
+  const updatedAt = '2026-01-01T00:00:01Z'
+  const doc = (id: string, checkpoint: SyncCheckpoint): WireDoc => ({
+    id,
+    _deleted: false,
+    updatedAt,
+    version: 1,
+    checkpoint
+  })
+  const rejected = Object.assign(new Error('bad checkpoint'), {
+    status: 400,
+    type: 'https://w3id.org/pws#invalid-request-body',
+    problems: [
+      {
+        detail:
+          'The checkpoint was not issued by this server for this Collection.',
+        pointer: '#/checkpoint'
+      }
+    ]
+  })
 
-  it('omits the checkpoint on the first pull and forwards it on resume', async () => {
+  /**
+   * A port that refuses every pull carrying a checkpoint and serves the one
+   * page `documents` from the start of the feed.
+   */
+  function refusingPort(documents: WireDoc[]): WasSyncPort & {
+    calls: Array<{ checkpoint?: SyncCheckpoint; limit: number }>
+  } {
+    const calls: Array<{ checkpoint?: SyncCheckpoint; limit: number }> = []
+    return {
+      calls,
+      async query(options) {
+        calls.push(options)
+        if (options.checkpoint !== undefined) {
+          throw rejected
+        }
+        return {
+          documents,
+          checkpoint: documents.at(-1)?.checkpoint ?? null
+        }
+      },
+      putContent: vi.fn(),
+      deleteContent: vi.fn(),
+      putMeta: vi.fn(),
+      get: vi.fn()
+    }
+  }
+
+  it('omits the checkpoint on the first pull and forwards the unwrapped string on resume', async () => {
     const port = fakePullPort([
       {
-        documents: [
-          { id: 'a', _deleted: false, updatedAt: cpA.updatedAt, version: 1 }
-        ],
+        documents: [doc('a', cpA)],
         checkpoint: cpA
       }
     ])
@@ -241,25 +297,23 @@ describe('createPullHandler', () => {
     const first = await pull(undefined, 100)
     expect(port.calls[0]).toEqual({ limit: 100 })
     expect('checkpoint' in port.calls[0]!).toBe(false)
-    expect(first.checkpoint).toEqual(cpA)
+    // Wrapped for RxDB: a bare string would be scattered by its checkpoint
+    // stacking (`Object.assign`).
+    expect(first.checkpoint).toEqual({ checkpoint: cpA })
     expect(first.documents).toHaveLength(1)
 
-    await pull(cpA, 50)
+    await pull(first.checkpoint, 50)
     expect(port.calls[1]).toEqual({ checkpoint: cpA, limit: 50 })
   })
 
   it('iterates: each page returns its own checkpoint to resume from', async () => {
     const port = fakePullPort([
       {
-        documents: [
-          { id: 'a', _deleted: false, updatedAt: cpA.updatedAt, version: 1 }
-        ],
+        documents: [doc('a', cpA)],
         checkpoint: cpA
       },
       {
-        documents: [
-          { id: 'b', _deleted: false, updatedAt: cpB.updatedAt, version: 1 }
-        ],
+        documents: [doc('b', cpB)],
         checkpoint: cpB
       }
     ])
@@ -268,8 +322,8 @@ describe('createPullHandler', () => {
     const page1 = await pull(undefined, 100)
     const page2 = await pull(page1.checkpoint, 100)
 
-    expect(page1.checkpoint).toEqual(cpA)
-    expect(page2.checkpoint).toEqual(cpB)
+    expect(page1.checkpoint).toEqual({ checkpoint: cpA })
+    expect(page2.checkpoint).toEqual({ checkpoint: cpB })
     expect(page2.documents[0]!.id).toBe('b')
   })
 
@@ -277,11 +331,69 @@ describe('createPullHandler', () => {
     const port = fakePullPort([{ documents: [], checkpoint: null }])
     const pull = createPullHandler(port)
 
-    const result = await pull(cpA, 100)
+    const result = await pull({ checkpoint: cpA }, 100)
 
     // The empty-page rule: do NOT persist null -- resume from the same position.
     expect(result.documents).toEqual([])
-    expect(result.checkpoint).toEqual(cpA)
+    expect(result.checkpoint).toEqual({ checkpoint: cpA })
+  })
+
+  it('restarts from the beginning when the server rejects the checkpoint', async () => {
+    const port = refusingPort([doc('a', cpA)])
+    const pull = createPullHandler(port)
+
+    const result = await pull({ checkpoint: 'issued-elsewhere' }, 100)
+
+    expect(port.calls).toEqual([
+      { checkpoint: 'issued-elsewhere', limit: 100 },
+      { limit: 100 }
+    ])
+    expect(result.checkpoint).toEqual({ checkpoint: cpA })
+    expect(result.documents.map(doc => doc.id)).toEqual(['a'])
+  })
+
+  it('remembers a refused checkpoint and skips the 400 when RxDB offers it again', async () => {
+    // An empty restarted feed gives RxDB nothing to persist, so it keeps
+    // offering the refused checkpoint on every poll.
+    const port = refusingPort([])
+    const pull = createPullHandler(port)
+
+    const first = await pull({ checkpoint: 'issued-elsewhere' }, 100)
+    expect(first.checkpoint).toBeUndefined()
+    expect(port.calls).toEqual([
+      { checkpoint: 'issued-elsewhere', limit: 100 },
+      { limit: 100 }
+    ])
+
+    await pull({ checkpoint: 'issued-elsewhere' }, 100)
+    expect(port.calls).toHaveLength(3)
+    expect(port.calls[2]).toEqual({ limit: 100 })
+  })
+
+  it('rethrows an invalid-request-body 400 that does not point at the checkpoint', async () => {
+    const port = {
+      async query() {
+        throw Object.assign(new Error('bad profile'), {
+          status: 400,
+          type: 'https://w3id.org/pws#invalid-request-body',
+          problems: [{ detail: 'Unknown profile.', pointer: '#/profile' }]
+        })
+      }
+    } as unknown as WasSyncPort
+    const pull = createPullHandler(port)
+
+    await expect(pull({ checkpoint: cpA }, 100)).rejects.toThrow('bad profile')
+  })
+
+  it('rethrows any other pull failure', async () => {
+    const port = {
+      async query() {
+        throw Object.assign(new Error('nope'), { status: 500 })
+      }
+    } as unknown as WasSyncPort
+    const pull = createPullHandler(port)
+
+    await expect(pull({ checkpoint: cpA }, 100)).rejects.toThrow('nope')
   })
 
   it('returns undefined checkpoint on a first, empty pull', async () => {

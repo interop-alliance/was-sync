@@ -309,6 +309,12 @@ the byoe-ecosystem layer map instead.
   for the 412 conflict path (`PrimaryState`, `withFeedPrimaryRead`). RxDB's own
   field names on a push row (`assumedMasterState`, `realMasterState`) are RxDB's
   API and stay as they are. Avoid: master state, remote state.
+- **Replication checkpoint** -- the record the pull handler hands RxDB and RxDB
+  persists in its replication meta (`ReplicationCheckpoint`): the opaque
+  `SyncCheckpoint` string under a `checkpoint` member. RxDB stacks checkpoints
+  with `Object.assign`, which would scatter a bare string into index-keyed
+  characters, so the string is wrapped for RxDB and unwrapped for the port.
+  Avoid: RxDB checkpoint, checkpoint object.
 - **Wire doc** -- one document as it travels on the `changes` feed (`WireDoc`).
   Contrast the **synced doc** (`SyncedDoc`), the same document as the local
   replica stores it. Avoid: change document, row payload.

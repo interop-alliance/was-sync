@@ -1084,6 +1084,7 @@ function fakeFeedBase(options: {
         _deleted: false,
         updatedAt: current?.updatedAt ?? '2026-01-01T00:00:00Z',
         version,
+        checkpoint: `cp-${id}-${version}`,
         data
       })
       return { version }
@@ -1101,7 +1102,13 @@ function fakeFeedBase(options: {
 }
 
 function feedDoc(id: string, version: number): WireDoc {
-  return { id, _deleted: false, updatedAt: '2026-02-02T00:00:00Z', version }
+  return {
+    id,
+    _deleted: false,
+    updatedAt: '2026-02-02T00:00:00Z',
+    version,
+    checkpoint: `cp-${id}-${version}`
+  }
 }
 
 describe('createPushHandler batch primary re-reads', () => {

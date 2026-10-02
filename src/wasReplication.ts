@@ -17,7 +17,7 @@ import {
   type RxReplicationState
 } from 'rxdb/plugins/replication'
 import type { RxCollection } from 'rxdb/plugins/core'
-import type { SyncCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
+import type { ReplicationCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
 import { createPullHandler } from './changesQuery.js'
 import { createPushHandler, type PushWriteAck } from './pushWrites.js'
 import { log } from './log.js'
@@ -99,7 +99,7 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
  *   decrypts nothing (bodies are opaque), so a replica's own echo has no
  *   decrypt to skip, and RxDB writes a pulled state into the local row only
  *   where the collection's `isEqual` says it differs.
- * @returns {RxReplicationState<SyncedDoc, SyncCheckpoint>}
+ * @returns {RxReplicationState<SyncedDoc, ReplicationCheckpoint>}
  */
 export function createWasReplication({
   rxCollection,
@@ -121,8 +121,8 @@ export function createWasReplication({
   autoStart?: boolean
   deletedField?: string
   writerId?: string
-}): RxReplicationState<SyncedDoc, SyncCheckpoint> {
-  return replicateRxCollection<SyncedDoc, SyncCheckpoint>({
+}): RxReplicationState<SyncedDoc, ReplicationCheckpoint> {
+  return replicateRxCollection<SyncedDoc, ReplicationCheckpoint>({
     replicationIdentifier,
     collection: rxCollection,
     deletedField,

@@ -179,13 +179,24 @@ export function copyOptionalBodyFields({
 }
 
 /**
- * The keyset position in the change feed: the `{ id, updatedAt }` of the last
- * document a pull returned. Passed back verbatim to resume, and used as the
- * RxDB replication checkpoint. `id` is the total-order tiebreaker within a
- * single `updatedAt`. was-client's own checkpoint type, aliased here so the
- * driver and the port agree by construction.
+ * The resume position in the change feed: the opaque checkpoint string of the
+ * last document a pull returned, scoped to the server and collection that
+ * issued it. Passed back verbatim to resume, compared by equality only, and
+ * used as the RxDB replication checkpoint. was-client's own checkpoint type,
+ * aliased here so the driver and the port agree by construction.
  */
 export type SyncCheckpoint = ClientSyncCheckpoint
+
+/**
+ * The checkpoint record the pull handler hands RxDB and RxDB persists in the
+ * replication meta: the opaque {@link SyncCheckpoint} under a `checkpoint`
+ * member. RxDB stacks checkpoints with `Object.assign`, which would scatter a
+ * bare string into index-keyed characters, so the string travels wrapped and
+ * the pull handler unwraps it on the way back.
+ */
+export interface ReplicationCheckpoint {
+  checkpoint: SyncCheckpoint
+}
 
 /**
  * One document as it travels on the `changes`-feed wire
@@ -213,7 +224,7 @@ export type WireDoc = ClientWireDoc
 /**
  * The local replica's document shape, shared across every synced collection.
  * The envelope fields are top-level (`id` primary key, `updatedAt` the
- * checkpoint sort field, `version` / `metaVersion` the server revisions); the
+ * wall-clock change stamp, `version` / `metaVersion` the server revisions); the
  * user bodies stay nested (`data` for content, `custom` for metadata) to avoid
  * field collisions. `_deleted` is managed by RxDB via `deletedField` and so is
  * not part of this "clean" shape (the handlers work with

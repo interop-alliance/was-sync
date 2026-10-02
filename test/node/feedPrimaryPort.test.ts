@@ -48,7 +48,7 @@ function fakeBasePort(
         const last = options.endless[options.endless.length - 1]!
         return {
           documents: options.endless,
-          checkpoint: { id: last.id, updatedAt: last.updatedAt }
+          checkpoint: last.checkpoint
         }
       }
       const documents = pages[page] ?? []
@@ -57,10 +57,7 @@ function fakeBasePort(
       const isLast = page >= pages.length - 1 || documents.length === 0
       return {
         documents,
-        checkpoint:
-          isLast || last === undefined
-            ? null
-            : { id: last.id, updatedAt: last.updatedAt }
+        checkpoint: isLast || last === undefined ? null : last.checkpoint
       }
     },
     async putContent() {
@@ -80,6 +77,7 @@ function wire(over: Partial<WireDoc> & { id: string }): WireDoc {
     _deleted: false,
     updatedAt: '2026-01-01T00:00:00Z',
     version: 1,
+    checkpoint: `cp-${over.id}`,
     ...over
   }
 }

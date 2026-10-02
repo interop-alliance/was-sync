@@ -9,6 +9,7 @@
  * and applies the empty-page `checkpoint: null` rule.
  */
 import type {
+  ReplicationCheckpoint,
   SyncCheckpoint,
   SyncedDoc,
   WasSyncPort,
@@ -49,9 +50,11 @@ export function wireDocToRxDoc(doc: WireDoc): WithDeleted<SyncedDoc> {
 
 /**
  * Builds the RxDB pull handler that fetches one `changes` page per call and
- * resumes from the previous checkpoint. RxDB passes the last stored checkpoint
- * (`undefined` on the first pull -- which the port omits from the request) and
- * the batch size.
+ * resumes from the previous checkpoint. RxDB passes the last stored
+ * {@link ReplicationCheckpoint} (`undefined` on the first pull) and the batch
+ * size; the handler unwraps the opaque string for the port, which omits an
+ * absent checkpoint from the request, and wraps the page's checkpoint for
+ * RxDB on the way back.
  *
  * The empty-page rule: when the server returns `checkpoint: null` (no change),
  * keep the checkpoint RxDB gave us rather than persisting `null`, so the next
@@ -60,29 +63,90 @@ export function wireDocToRxDoc(doc: WireDoc): WithDeleted<SyncedDoc> {
  * being empty, so a page carrying documents with no checkpoint keeps resuming
  * too.
  *
+ * The checkpoint is opaque, passed back verbatim. A server refuses a
+ * checkpoint it did not issue (a replica created against another server) with
+ * `invalid-request-body` (400) at `#/checkpoint`. The handler then pulls again
+ * from the beginning, which is safe because the apply path is keyed by
+ * resource id. RxDB persists a checkpoint only with a non-empty page, so when
+ * the restarted feed is empty the refused checkpoint stays stored and RxDB
+ * offers it again on the next poll; the handler remembers the refusal and
+ * skips straight to the restart, so the 400 round trip is paid once per
+ * process rather than once per poll.
+ *
  * @param port {WasSyncPort}
- * @returns {(lastCheckpoint: SyncCheckpoint | undefined, batchSize: number) =>
- *   Promise<{ documents: WithDeleted<SyncedDoc>[], checkpoint: SyncCheckpoint | undefined }>}
+ * @returns {(lastCheckpoint: ReplicationCheckpoint | undefined, batchSize: number) =>
+ *   Promise<{ documents: WithDeleted<SyncedDoc>[], checkpoint: ReplicationCheckpoint | undefined }>}
  */
 export function createPullHandler(port: WasSyncPort) {
+  let refused: SyncCheckpoint | undefined
   return async function pull(
-    lastCheckpoint: SyncCheckpoint | undefined,
+    lastCheckpoint: ReplicationCheckpoint | undefined,
     batchSize: number
   ): Promise<{
     documents: WithDeleted<SyncedDoc>[]
-    checkpoint: SyncCheckpoint | undefined
+    checkpoint: ReplicationCheckpoint | undefined
   }> {
-    const response = await port.query({
-      // Omit `checkpoint` entirely on the first pull (the port sends no
-      // checkpoint field, not `null`).
-      ...(lastCheckpoint !== undefined && { checkpoint: lastCheckpoint }),
-      limit: batchSize
-    })
+    // Omit `checkpoint` entirely when there is none to resume from (the port
+    // sends no checkpoint field, not `null`).
+    const fetchPage = (checkpoint?: SyncCheckpoint) =>
+      port.query({
+        ...(checkpoint !== undefined && { checkpoint }),
+        limit: batchSize
+      })
+    let resumeFrom = lastCheckpoint?.checkpoint
+    if (resumeFrom === refused) {
+      resumeFrom = undefined
+    }
+    let response
+    try {
+      response = await fetchPage(resumeFrom)
+    } catch (err) {
+      if (resumeFrom === undefined || !isRejectedCheckpoint(err)) {
+        throw err
+      }
+      // The server did not issue this checkpoint: restart the feed, and do
+      // not hand the refused checkpoint back should the restarted page be
+      // empty.
+      refused = resumeFrom
+      resumeFrom = undefined
+      response = await fetchPage()
+    }
+    // Empty page (`checkpoint: null`) means "no change": keep the prior
+    // checkpoint so the feed does not restart from the beginning.
+    const next = response.checkpoint ?? resumeFrom
     return {
       documents: response.documents.map(wireDocToRxDoc),
-      // Empty page (`checkpoint: null`) means "no change": keep the prior
-      // checkpoint so the feed does not restart from the beginning.
-      checkpoint: response.checkpoint ?? lastCheckpoint
+      checkpoint: next === undefined ? undefined : { checkpoint: next }
     }
   }
+}
+
+/**
+ * Whether a failed `changes` pull is the server refusing the supplied
+ * checkpoint: a 400 whose problem type is `invalid-request-body` and whose
+ * problems point at `#/checkpoint`. A 400 of the same type that points
+ * elsewhere (an unaccepted `profile`, say) is not a checkpoint refusal and is
+ * rethrown as is.
+ *
+ * @param err {unknown}
+ * @returns {boolean}
+ */
+function isRejectedCheckpoint(err: unknown): boolean {
+  if (err === null || typeof err !== 'object') {
+    return false
+  }
+  const { status, type, problems } = err as {
+    status?: unknown
+    type?: unknown
+    problems?: unknown
+  }
+  return (
+    status === 400 &&
+    typeof type === 'string' &&
+    type.endsWith('#invalid-request-body') &&
+    Array.isArray(problems) &&
+    problems.some(
+      problem => (problem as { pointer?: unknown })?.pointer === '#/checkpoint'
+    )
+  )
 }

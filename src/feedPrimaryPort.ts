@@ -101,8 +101,8 @@ async function walkFeedFor({
     }
     checkpoint = next
   }
-  // The page budget ran out before the feed's end. The feed is keyset-ordered
-  // ascending on `updatedAt`, so a just-conflicted resource sits at the tail --
+  // The page budget ran out before the feed's end. The feed is ordered by the
+  // server's feed position, so a just-conflicted resource sits at the tail --
   // the least-reachable position -- and may well be past the cap. Reporting
   // `null` here would fabricate a false tombstone in the conflict assembler and
   // drop the winner's payload. Throw instead: RxDB treats a thrown push-handler

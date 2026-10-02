@@ -28,6 +28,7 @@ export {
   type PrimaryReadCache,
   type PrimaryState,
   type SyncCheckpoint,
+  type ReplicationCheckpoint,
   type SyncedDoc,
   type WasSyncBasePort,
   type WasSyncPort,

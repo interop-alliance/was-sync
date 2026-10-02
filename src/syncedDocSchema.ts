@@ -38,8 +38,8 @@ export interface SyncedDocSchema {
 
 /**
  * Returns the synced-doc schema. `id` is the primary key (the WAS resourceId);
- * `updatedAt` is indexed because it is the change-feed sort field / checkpoint
- * component.
+ * the `updatedAt` index is part of the stored schema (below) and so stays
+ * although the driver no longer sorts or resumes by it.
  *
  * The shape is stored state rather than a code detail: RxDB hashes it and
  * refuses to open an existing replica whose stored hash differs at the same
