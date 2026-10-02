@@ -117,6 +117,20 @@ describe('withFeedPrimaryRead get', () => {
     })
   })
 
+  it('carries the writer label into the primary state', async () => {
+    const base = fakeBasePort({
+      pages: [
+        [wire({ id: 'r1', version: 7, data: { a: 1 }, writerId: 'writer-b' })]
+      ]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'r1' })).toMatchObject({
+      version: 7,
+      writerId: 'writer-b'
+    })
+  })
+
   it('carries the opaque etag and metaEtag validators into the primary state', async () => {
     // The CORS-blocked deployment this seam exists for still needs a validator
     // to echo back as the retry's `ifMatch`; the feed body carries it just

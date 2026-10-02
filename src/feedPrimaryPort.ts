@@ -42,12 +42,16 @@ const PAGE_SIZE = 500
 
 /**
  * Builds a `PrimaryState` from a `changes`-feed document (all fields in-body).
+ * The feed's `writerId` label rides along explicitly: it is not one of the
+ * optional body fields (the local row has no member for it), but the push
+ * handler's delete retry reads it off the primary.
  */
 function toPrimaryState(doc: WireDoc): PrimaryState {
   const primary: PrimaryState = {
     version: doc.version,
     updatedAt: doc.updatedAt,
-    deleted: doc._deleted
+    deleted: doc._deleted,
+    ...(doc.writerId !== undefined && { writerId: doc.writerId })
   }
   copyOptionalBodyFields({ source: doc, target: primary })
   return primary

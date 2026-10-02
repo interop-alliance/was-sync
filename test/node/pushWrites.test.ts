@@ -1171,10 +1171,12 @@ describe('createPushHandler benign delete retry', () => {
    */
   function driftingDeletePort({
     serverVersion,
-    serverData
+    serverData,
+    serverWriterId
   }: {
     serverVersion: number
     serverData: unknown
+    serverWriterId?: string
   }): WasSyncPort & { deletes: Array<string | undefined> } {
     const deletes: Array<string | undefined> = []
     return {
@@ -1200,7 +1202,8 @@ describe('createPushHandler benign delete retry', () => {
           version: serverVersion,
           etag: etagFor(serverVersion),
           updatedAt: '2026-02-02T00:00:00Z',
-          data: serverData as never
+          data: serverData as never,
+          ...(serverWriterId !== undefined && { writerId: serverWriterId })
         }
       }
     }
@@ -1333,6 +1336,105 @@ describe('createPushHandler benign delete retry', () => {
         _deleted: false
       }
     ])
+  })
+
+  it("reports a conflict when the equal body is under another writer's label", async () => {
+    // Delete-then-recreate by another writer: on a content-addressed row the
+    // re-created body reads back equal, so only the label tells it apart from
+    // this replica's own revision drift. The delete is not re-issued.
+    const port = driftingDeletePort({
+      serverVersion: 3,
+      serverData: { a: 1 },
+      serverWriterId: 'writer-b'
+    })
+    const push = createPushHandler({ port, writerId: 'writer-a' })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 1,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ version: 1, _deleted: true })
+      }
+    ])
+
+    expect(port.deletes).toEqual([etagFor(1)])
+    expect(conflicts).toEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-02-02T00:00:00Z',
+        version: 3,
+        etag: etagFor(3),
+        data: { a: 1 },
+        _deleted: false
+      }
+    ])
+  })
+
+  it('re-issues the delete when the equal body is under its own label', async () => {
+    const port = driftingDeletePort({
+      serverVersion: 1,
+      serverData: { a: 1 },
+      serverWriterId: 'writer-a'
+    })
+    const push = createPushHandler({ port, writerId: 'writer-a' })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 0,
+          etag: etagFor(0),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ version: 0, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.deletes).toEqual([etagFor(0), etagFor(1)])
+  })
+
+  it('falls back to body equality when either side carries no label', async () => {
+    // No label injected here, a label on the server: equality decides.
+    const unlabeledReplica = driftingDeletePort({
+      serverVersion: 1,
+      serverData: { a: 1 },
+      serverWriterId: 'writer-b'
+    })
+    expect(
+      await createPushHandler({ port: unlabeledReplica })([
+        {
+          assumedMasterState: newDoc({
+            version: 0,
+            etag: etagFor(0),
+            data: { a: 1 }
+          }),
+          newDocumentState: newDoc({ version: 0, _deleted: true })
+        }
+      ])
+    ).toEqual([])
+    expect(unlabeledReplica.deletes).toEqual([etagFor(0), etagFor(1)])
+
+    // A label injected here, none recorded on the server's revision.
+    const unlabeledServer = driftingDeletePort({
+      serverVersion: 1,
+      serverData: { a: 1 }
+    })
+    expect(
+      await createPushHandler({ port: unlabeledServer, writerId: 'writer-a' })([
+        {
+          assumedMasterState: newDoc({
+            version: 0,
+            etag: etagFor(0),
+            data: { a: 1 }
+          }),
+          newDocumentState: newDoc({ version: 0, _deleted: true })
+        }
+      ])
+    ).toEqual([])
+    expect(unlabeledServer.deletes).toEqual([etagFor(0), etagFor(1)])
   })
 
   it('skips a delete with no assumed primary and reports it accepted', async () => {

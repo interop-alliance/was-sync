@@ -88,7 +88,11 @@ numbered so items and reviews can cite them.
    conditional on a stale revision would be refused forever and leave the
    resource live. A refused delete re-reads the resource, and a body unchanged
    under a drifted revision is re-deleted against the fresh ETag; every other
-   412 is a real conflict (`src/pushWrites.ts`). The push-ack write-back only
+   412 is a real conflict (`src/pushWrites.ts`). Body equality alone cannot tell
+   that drift from a delete-then-recreate by another writer on a
+   content-addressed row, so when the replica was given a `writerId` and the
+   re-read primary carries one, the labels must match for the retry to fire;
+   with no label on either side, equality decides. The push-ack write-back only
    makes the case rarer -- it is best-effort and swallows its own failure -- so
    the retry stays the authority for deletes. A delete with no assumed primary
    is skipped, not sent: the row was created and deleted locally before this

@@ -555,3 +555,42 @@ predicate now has no consumer anywhere in the ecosystem, and its doc comments
 (`src/sync/predicates.ts`, `src/sync/index.ts`) still tell a replication driver
 to build the give-up path this item removed. Whether the export itself goes is a
 decision recorded on that item, not here.
+
+### WS-5: Benign-412 delete retry can delete an independently re-created resource
+
+- status: done
+- done: 2026-10-01
+- priority: medium
+- labels: push, conditional-writes, correctness
+- acceptance:
+  - [x] The "my own revision drift" decision for a delete retry compares the
+        re-read primary's `writerId` against the replica's own injected
+        `writerId`, and a mismatch is a real conflict; body equality alone
+        decides only when either side carries no label
+  - [x] The feed-walking primary read carries the feed's `writerId` into the
+        primary state, so the comparison holds on both port configurations
+  - [x] A test shows: stale assumed version on replica A, delete-then-recreate
+        of the same id by another writer, A's delete surfacing as a conflict
+        instead of tombstoning the re-created resource
+
+Context: On a content-addressed collection the body is fixed per id, so
+comparing the primary's data against the assumed data in `src/pushWrites.ts`
+cannot tell "my own stale version" from "someone deleted and re-created this".
+Freewallet's revoke/re-add and purge-undecryptable/resync paths do exactly that.
+Replica A's delete 412s, the re-read shows equal data, and the retry re-issues
+DELETE against the fresh ETag, tombstoning the re-created resource without the
+412 ever reaching RxDB as a conflict. The metadata-edit variant is not reachable
+(a `/meta` write leaves content version unchanged) and a live tombstone is
+correctly rethrown; only delete-then-recreate is exposed.
+
+The discriminating signal is the writer label. Since writer attribution on push
+(0.6.0) the handler holds the replica's own `writerId`, the server records the
+`Writer-Id` header of every content write and delete into the resource's
+metadata, and the re-read (`get` and the feed walk alike) surfaces it as
+`writerId` on the primary state. Neither of the originally suggested signals
+works: the server's content version is monotonic across a delete and re-create,
+and the benign case is itself a version drift, so a version comparison has no
+discriminating power; `createdBy` is the invoking DID, which two replicas of the
+same wallet share. When the replica was given no `writerId`, or the server holds
+none for the revision, equality remains the only rule, so an unlabeled
+deployment keeps the pre-existing behavior.

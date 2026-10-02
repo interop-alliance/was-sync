@@ -879,6 +879,69 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
+  it('surfaces a delete of a resource another writer re-created as a conflict, not a tombstone', async () => {
+    // Replica A pushes a row under its own label, then another writer deletes
+    // and re-creates the same id with the same body. A's delete carries A's
+    // last-known validator and 412s; the re-read body is equal, so only the
+    // writer label says this is not A's own revision drift. Remote wins, so A
+    // ends up holding the re-created row and the server's copy stays live.
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-recreate',
+      writerId: 'writer-a'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-recreated',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { fixed: true }
+    })
+    await eventually(
+      async () =>
+        committed(await observer.get({ id: 'cid-recreated' })) &&
+        (await collection.findOne('cid-recreated').exec())?.get('etag') !==
+          undefined,
+      () => replication.reSync()
+    )
+
+    const own = await observer.get({ id: 'cid-recreated' })
+    await observer.deleteContent({
+      id: 'cid-recreated',
+      ifMatch: own!.etag,
+      writerId: 'writer-b'
+    })
+    const recreated = await observer.putContent({
+      id: 'cid-recreated',
+      data: { fixed: true },
+      ifNoneMatch: true,
+      writerId: 'writer-b'
+    })
+    expect(recreated.version).toBeGreaterThan(own!.version)
+
+    await (await collection.findOne('cid-recreated').exec())!.remove()
+    // The delete is refused and resolved rather than re-issued: the local row
+    // comes back live on the re-created revision.
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-recreated').exec()
+        return current !== null && current.get('version') === recreated.version
+      },
+      () => replication.reSync()
+    )
+
+    const primary = await observer.get({ id: 'cid-recreated' })
+    expect(primary).not.toBeNull()
+    expect(primary!.version).toBe(recreated.version)
+    expect(primary!.writerId).toBe('writer-b')
+
+    await replication.cancel()
+  })
+
   it('declares the injected writerId on every push, and a mixed feed converges the same with and without one', async () => {
     const { port, observer } = await openServerCollection()
     // A foreign-labeled revision, an unlabeled one, and a tombstone, all

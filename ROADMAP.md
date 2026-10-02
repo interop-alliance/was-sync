@@ -22,30 +22,6 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 
 ---
 
-### WS-5: Benign-412 delete retry can delete an independently re-created resource
-
-- status: todo
-- priority: medium
-- labels: push, conditional-writes, correctness
-- acceptance:
-  - [ ] The "my own revision drift" decision for a delete retry uses a signal
-        with discriminating power on content-addressed rows (for example a
-        version or createdBy comparison, or feed-based provenance), not data
-        equality alone
-  - [ ] A test shows: stale assumed version on replica A, delete-then-recreate
-        of the same id by another writer, A's delete surfacing as a conflict
-        instead of tombstoning the re-created resource
-
-Context: On a content-addressed collection the body is fixed per id, so
-comparing the primary's data against the assumed data (`src/pushWrites.ts:210`)
-cannot tell "my own stale version" from "someone deleted and re-created this".
-Freewallet's revoke/re-add and purge-undecryptable/resync paths do exactly that.
-Replica A's delete 412s, the re-read shows equal data, and the retry re-issues
-DELETE against the fresh ETag, tombstoning the re-created resource without the
-412 ever reaching RxDB as a conflict. The metadata-edit variant is not reachable
-(a `/meta` write leaves content version unchanged) and a live tombstone is
-correctly rethrown; only delete-then-recreate is exposed.
-
 ### WS-6: Default `isEqual` hides server-only fields on the feed echo
 
 - status: todo

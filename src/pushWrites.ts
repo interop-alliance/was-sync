@@ -45,6 +45,16 @@
  * unchanged is the same content under a drifted revision: the delete is
  * re-issued against the fresh ETag. Every other `412` is a real conflict.
  *
+ * Body equality alone cannot tell that drift from a delete-then-recreate by
+ * another writer: on a content-addressed collection the body is fixed per id,
+ * so the re-created resource reads back equal and the retry would tombstone it.
+ * The writer label is the discriminating signal. When this replica was given a
+ * `writerId` and the re-read primary carries one, the two must match for the
+ * retry to fire; a revision under another writer's label is a real conflict.
+ * When either side carries no label (no `writerId` injected, or the server
+ * holds none for the revision), body equality is all there is and the retry
+ * keeps its original rule.
+ *
  * A `412` whose re-read resolves `null` is reported as a tombstone conflict
  * entry with no `etag` and `version: 0`, the value a fresh local row carries
  * for "no server revision known". The plain was-client port resolves `null` for
@@ -299,11 +309,25 @@ async function pushRow({
     }
   }
 
+  // Whether a re-read primary is this replica's own content under a drifted
+  // revision (the header's delete note): an unchanged body, and no writer label
+  // on either side that says another writer produced the revision.
+  const isOwnDrift = (primary: PrimaryState): boolean => {
+    if (!bodiesEqual(primary.data, assumedMasterState?.data)) {
+      return false
+    }
+    return (
+      writerId === undefined ||
+      primary.writerId === undefined ||
+      primary.writerId === writerId
+    )
+  }
+
   // Deletes the remote content conditional on the assumed etag (none when the
-  // assumed primary is a tombstone), recovering from the one benign `412`: a
-  // revision drift with an unchanged body (the header's delete note). A `412`
-  // with no assumed etag, an absent primary, or a primary whose body really
-  // differs is rethrown, so the caller's conflict path reports it unchanged.
+  // assumed primary is a tombstone), recovering from the one benign `412`. A
+  // `412` with no assumed etag, an absent primary, a primary whose body really
+  // differs, or a primary under another writer's label is rethrown, so the
+  // caller's conflict path reports it unchanged.
   const deleteWithBenignRetry = async (): Promise<WriteAck | undefined> => {
     try {
       return await deleteAbsentAsDone({
@@ -315,10 +339,7 @@ async function pushRow({
         throw err
       }
       const primary = await readPrimary()
-      if (
-        primary === null ||
-        !bodiesEqual(primary.data, assumedMasterState?.data)
-      ) {
+      if (primary === null || !isOwnDrift(primary)) {
         throw err
       }
       log.debug('Delete refused on a drifted revision; re-issuing it', {

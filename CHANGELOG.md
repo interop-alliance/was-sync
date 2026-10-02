@@ -1,5 +1,16 @@
 # @interop/was-sync Changelog
 
+## 0.8.0 - TBD
+
+### Fixed
+
+- The benign-412 delete retry no longer tombstones a resource another writer
+  deleted and re-created under the same id. When the replica has a `writerId`
+  and the re-read primary carries one, the retry fires only if they match; a
+  revision under another writer's label surfaces as a conflict. With no label on
+  either side the body-equality rule is unchanged. The feed-walking primary read
+  now carries the feed's `writerId` into the primary state (WS-5).
+
 ## 0.7.0 - 2026-10-01
 
 ### Changed
