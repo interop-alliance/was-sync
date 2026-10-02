@@ -40,7 +40,7 @@
  * body.
  *
  * `isEqual` stays cheap and synchronous, as RxDB requires: a structural compare
- * of the opaque bodies plus the server revisions.
+ * of every member of the synced document, the server-managed ones included.
  */
 import { remotePayloadWins } from '@interop/social-core'
 import {
@@ -86,11 +86,19 @@ export type ConflictWinner = 'local' | 'remote'
 /**
  * The default structural equality RxDB asks for before it resolves anything.
  *
- * Non-async and fast, as RxDB requires. The server revisions (`version` /
- * `metaVersion`) participate deliberately: this replica's own write comes back
- * off the feed byte-identical but one revision ahead, and it must NOT compare
- * equal, or the higher revision is never adopted and every later conditional
- * write sends a stale `If-Match` (a guaranteed 412).
+ * Non-async and fast, as RxDB requires. Every member of the synced document
+ * participates, the server-managed ones included. RxDB writes a pulled state
+ * into the local row only where this says the two differ, and the feed echo of
+ * this replica's own write is where that matters: the push-ack write-back has
+ * already stamped the row with the server's `version` / `etag`, so by the time
+ * the echo arrives it differs only in what the server alone assigns
+ * (`createdBy`, its own `updatedAt`, a `metaVersion` / `metaEtag` the write
+ * did not return). An equality that stopped at the bodies and revisions would
+ * let RxDB skip the echo, and every row this replica created would keep the
+ * client's `updatedAt` and never learn its `createdBy`.
+ *
+ * The bodies compare canonically ({@link bodiesEqual}); every other member
+ * compares strictly, an absent member equal only to an absent one.
  *
  * @param a {WithDeleted<SyncedDoc>}
  * @param b {WithDeleted<SyncedDoc>}
@@ -102,8 +110,14 @@ export function statesEqual(
 ): boolean {
   return (
     a._deleted === b._deleted &&
+    a.id === b.id &&
+    a.updatedAt === b.updatedAt &&
     a.version === b.version &&
     a.metaVersion === b.metaVersion &&
+    a.createdBy === b.createdBy &&
+    a.epoch === b.epoch &&
+    a.etag === b.etag &&
+    a.metaEtag === b.metaEtag &&
     bodiesEqual(a.data, b.data) &&
     bodiesEqual(a.custom, b.custom)
   )

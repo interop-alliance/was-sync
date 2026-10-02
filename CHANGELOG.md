@@ -10,6 +10,13 @@
   revision under another writer's label surfaces as a conflict. With no label on
   either side the body-equality rule is unchanged. The feed-walking primary read
   now carries the feed's `writerId` into the primary state (WS-5).
+- The default `isEqual` (`statesEqual`) compares every member of the synced
+  document. It now also compares `id`, `updatedAt`, `createdBy`, `epoch`,
+  `etag`, and `metaEtag`. The old comparison let RxDB skip the feed echo of a
+  replica's own write. As a result, a row the replica created kept the client's
+  `updatedAt` and never received the server-assigned `createdBy`. A consumer
+  that overrode `isEqual` with a deep equality to get this behavior can drop the
+  override (WS-6).
 
 ## 0.7.0 - 2026-10-01
 

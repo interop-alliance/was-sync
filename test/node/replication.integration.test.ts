@@ -531,6 +531,23 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     const primary = await observer.get({ id: 'cid-author' })
     expect(primary?.createdBy).toBe(controllerDid)
 
+    // The echo of that write comes back down the feed carrying what the
+    // server alone assigns, and lands in the local row: by then the ack
+    // write-back has stamped `version` / `etag`, so only `createdBy` and the
+    // server's `updatedAt` are left to differ, and the default `isEqual` has
+    // to see them. No pull is nudged until the pushes have settled
+    // (`awaitInSync`): RxDB defers a pulled state behind a pending local
+    // write while its checkpoint moves on, and the ack write-back is such a
+    // write until the push cycle it triggers has run (WS-17).
+    await replication.awaitInSync()
+    replication.reSync()
+    await replication.awaitInSync()
+    const local = (await collection.findOne('cid-author').exec())?.toJSON()
+    expect(local?.createdBy).toBe(controllerDid)
+    expect(local?.updatedAt).toBe(primary?.updatedAt)
+    expect(local?.version).toBe(primary?.version)
+    expect(local?.etag).toBe(primary?.etag)
+
     await replication.cancel()
   })
 
@@ -1001,26 +1018,28 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       version: 0,
       data: { from: 'own-doomed' }
     })
+    // No pull is nudged while A's pushes are in flight: RxDB defers a pulled
+    // state behind a pending local write while its checkpoint moves on, and
+    // the ack write-back is such a write until the push cycle it triggers has
+    // run (WS-17). The pushes alone bring the server up to date.
     await eventually(
       async () =>
         committed(await observer.get({ id: 'cid-own' })) &&
-        committed(await observer.get({ id: 'cid-own-gone' })),
-      () => replicationA.reSync()
+        committed(await observer.get({ id: 'cid-own-gone' }))
     )
     // Wait for the ack write-back before deleting, so the delete carries the
     // server's validator.
     await eventually(
       async () =>
         (await replicaA.findOne('cid-own-gone').exec())?.get('etag') !==
-        undefined,
-      () => replicationA.reSync()
+        undefined
     )
     await (await replicaA.findOne('cid-own-gone').exec())?.remove()
     await eventually(
-      async () => (await observer.get({ id: 'cid-own-gone' })) === null,
-      () => replicationA.reSync()
+      async () => (await observer.get({ id: 'cid-own-gone' })) === null
     )
-    // A's own echoes come back down the feed before it stops.
+    // A's own echoes come back down the feed once its pushes have settled.
+    await replicationA.awaitInSync()
     replicationA.reSync()
     await replicationA.awaitInSync()
     await replicationA.cancel()
@@ -1079,16 +1098,10 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       'cid-unlabeled'
     ])
     expect(withLabel).toEqual(withoutLabel)
-    // The writer's own replica agrees on every revision it replicated. Its
-    // own rows keep the local `updatedAt` and learn no `createdBy` from their
-    // echo, since the ack write-back already settled them, so those two are
-    // left out of the comparison.
-    const revisionOf = ({
-      updatedAt: _updatedAt,
-      createdBy: _createdBy,
-      ...rest
-    }: Record<string, unknown>) => rest
-    expect(replicaAState.map(revisionOf)).toEqual(withLabel.map(revisionOf))
+    // The writer's own replica agrees with a fresh one on every member of
+    // every row it replicated, the server-assigned `createdBy` and `updatedAt`
+    // of its own rows included: their feed echo landed over the ack write-back.
+    expect(replicaAState).toEqual(withLabel)
     for (const doc of withLabel) {
       expect('writerId' in doc).toBe(false)
     }

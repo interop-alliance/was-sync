@@ -151,6 +151,27 @@ describe('makeLwwConflictHandler', () => {
     expect(handler.isEqual(echo, { ...echo, metaVersion: 1 })).toBe(false)
   })
 
+  it('isEqual is false when only a server-managed member differs', () => {
+    // The echo of this replica's own write, after the ack write-back has
+    // already stamped `version` / `etag`: only what the server alone assigns
+    // is left to differ, and each of those must still land in the local row.
+    const stamped = row({ updatedAt: 't1', writerId: 'd1' }, { version: 1 })
+    stamped.etag = '"g1-1"'
+    expect(handler.isEqual(stamped, { ...stamped })).toBe(true)
+    expect(
+      handler.isEqual(stamped, { ...stamped, createdBy: 'did:key:z6Mk' })
+    ).toBe(false)
+    expect(
+      handler.isEqual(stamped, { ...stamped, updatedAt: '000000000009' })
+    ).toBe(false)
+    expect(handler.isEqual(stamped, { ...stamped, epoch: 'e2' })).toBe(false)
+    expect(handler.isEqual(stamped, { ...stamped, etag: '"g1-2"' })).toBe(false)
+    expect(handler.isEqual(stamped, { ...stamped, metaEtag: '"m1"' })).toBe(
+      false
+    )
+    expect(handler.isEqual(stamped, { ...stamped, id: 'r2' })).toBe(false)
+  })
+
   it('resolves to the later payload (remote wins)', async () => {
     const remote = row({ updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' })
     const local = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })

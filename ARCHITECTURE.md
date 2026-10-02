@@ -256,6 +256,29 @@ numbered so items and reviews can cite them.
     `@interop/wallet-core/sync` stamps pushes the same way and additionally
     skips the decrypt of an own-writer echo whose `etag` its store confirms it
     holds; the two converge on the same server state either way.
+18. **The default `isEqual` compares every member of the synced document.**
+    `statesEqual`, the default `isEqual` of `makeConflictHandler`, compares the
+    server-managed members along with `_deleted`, the revisions, and the two
+    bodies. Those are `id`, `updatedAt`, `createdBy`, `epoch`, `etag`, and
+    `metaEtag` (`src/conflictHandler.ts`). The bodies compare by `bodiesEqual`
+    (invariant 6), and every other member compares strictly. RxDB writes a
+    pulled state into the local row only where `isEqual` says the two differ,
+    and the echo of this replica's own write is where that matters. By the time
+    the echo arrives, the ack write-back has already stamped the row with the
+    server's `version` and `etag`. What is left to differ is what the server
+    alone assigns, namely `createdBy` and the server's `updatedAt`. An equality
+    limited to the bodies and revisions let RxDB skip the echo. Every row a
+    replica created then kept the client's `updatedAt` and never learned its
+    `createdBy`. A consumer that injects its own `isEqual` takes on the same
+    requirement. One timing window remains, tracked as WS-17. RxDB defers a
+    pulled state for a row whose local state differs from its assumed primary,
+    and the pull checkpoint still moves past it, so the deferred state is never
+    pulled again. The ack write-back is a plain local write, so the row is in
+    that state until the push cycle it triggers has run. An echo pulled inside
+    that window is dropped whatever `isEqual` says. The window holds no HTTP
+    round trip, so a polling pull rarely lands in it, but a pull nudged right
+    after a push does. The integration suite therefore waits for pushes to
+    settle before it nudges a pull.
 
 ## Ownership heuristics
 
@@ -328,6 +351,10 @@ the byoe-ecosystem layer map instead.
 - **Ack** -- the server revision and opaque `ETag` an accepted write earned
   (`PushWriteAck`), written back into the local row so the next conditional
   write's `If-Match` echoes what the server holds. Avoid: receipt, confirmation.
+- **Echo** -- the `changes` feed entry for a write this replica pushed, pulled
+  back down on a later cycle. It is the only way what the server alone assigns
+  (`createdBy`, the server's `updatedAt`) reaches the local row, since the ack
+  carries only revisions and ETags (invariant 18). Avoid: reflection, bounce.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a revision; it attributes history and breaks last-write-wins
   ties. On the wire it is the WAS `writerId`, which the push handler declares

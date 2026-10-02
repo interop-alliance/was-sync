@@ -594,3 +594,58 @@ discriminating power; `createdBy` is the invoking DID, which two replicas of the
 same wallet share. When the replica was given no `writerId`, or the server holds
 none for the revision, equality remains the only rule, so an unlabeled
 deployment keeps the pre-existing behavior.
+
+### WS-6: Default `isEqual` hides server-only fields on the feed echo
+
+- status: done
+- done: 2026-10-01
+- priority: medium
+- labels: conflict-handler, pull, correctness
+- touches:
+  - was-sync (ARCHITECTURE.md): done in this change, as invariant 18.
+  - was-react (uses the default `isEqual`): WR-54. No code change; it picks the
+    fix up by consuming `@interop/was-sync` 0.8.0.
+  - freewallet (already overrides with deepEqual): FW-626, which drops the
+    `deepEqual` override in `src/stores/contactsConflictHandler.ts` once on
+    0.8.0.
+- acceptance:
+  - [x] The default equality used by RxDB's downstream to decide whether to
+        write the master state includes `updatedAt`, `createdBy`, and `epoch`
+        (or ARCHITECTURE.md states why the driver deliberately excludes them and
+        each consumer is told to override)
+  - [x] An integration test creates a row locally, lets the echo arrive with a
+        server-assigned `createdBy`, and asserts it lands in the local row
+  - [x] The test server used by the integration suite assigns `createdBy` so the
+        case is observable
+  - [x] `touches:` entries resolved
+
+Context: `statesEqual` (`src/conflictHandler.ts:84`), the default `isEqual`,
+omits `updatedAt`, `createdBy`, and `epoch`. RxDB's downstream skips writing the
+master state to the fork when `isEqual` is true, so server-only fields on the
+feed echo of this replica's own write never land locally. Every row a replica
+created keeps the client's `updatedAt` and no `createdBy`. Freewallet documents
+this and overrides `isEqual` with deepEqual
+(`contactsConflictHandler.ts:19-24`); was-react uses the default and is exposed.
+No current test asserts `createdBy` on a locally created row, and the fake
+server never assigns one (see WS-11).
+
+2026-09-28: seen again while adding writerId push stamping. The mixed-feed
+convergence case in `test/node/replication.integration.test.ts`, run against the
+live server, compares the writing replica on every field except `updatedAt` and
+`createdBy`, with a comment saying why. That exclusion is the check to remove
+when this lands. The observation there named the ack write-back as the cause: it
+is a local write, so the echo lands behind a push cycle with nothing to send
+while the checkpoint moves on. Confirm which of the two mechanisms (that one, or
+the `isEqual` skip above) actually drops the fields before fixing.
+
+2026-10-01: both mechanisms were confirmed. The `isEqual` skip is fixed here.
+`statesEqual` now compares every member of the synced document, and
+ARCHITECTURE.md invariant 18 records why. The `createdBy` integration case now
+asserts that the echo lands locally, and the convergence case compares every
+member with no `updatedAt` / `createdBy` exclusion. The live
+`was-teaching-server` already assigns `createdBy` (WS-11). The ack write-back
+window is real too, and it made the convergence case fail on its first run. RxDB
+defers an echo pulled between the write-back and the push cycle it triggers, and
+never pulls it again. Closing that needs a reshaped ack path, so it is split out
+as WS-17. Until then, both integration cases wait for pushes to settle before
+they nudge a pull.
