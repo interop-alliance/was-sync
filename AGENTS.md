@@ -162,6 +162,8 @@ Each work item follows this schema:
   in place with the follow-up item filed there (`<repo>: <PREFIX>-N`), with what
   already shipped there, or with `unaffected: <repo> (<why>)`. The follow-up
   items carry the cross-repo work on their own schedule.
+- Never refer to invariant just by number, always include a brief description
+  in parentheses. Wrong: `invariant 25`, correct: `invariant 25 (<brief explanation of what it entails>)`
 
 Rules:
 
