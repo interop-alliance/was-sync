@@ -1,17 +1,22 @@
 # WS-23: Adopt the WAS-96 stamp data model (design)
 
 - item: WS-23
-- status: reviewed
-- approved:
+- status: approved
+- approved: 2026-10-03
 - wire-level decisions contained: listed in section 5 (the replica schema's
   stored shape and `required` list, the nested `meta` member, the absent-stamp
   rule that replaces the `0` sentinel, the `/meta` routing key, the stamp
   comparison, the no-guard rule); all seven signed off by the user on
   2026-10-03, each taking the recommendation as stated
-- decision records extracted: none yet (candidates listed in section 6)
+- decision records extracted: decisions/0002 (the nested `meta` object is stored
+  as the wire shapes it, not flattened)
 - review pass: 2026-10-03, six charters (consumer completeness, matrix attack,
   adversary walk, invariant audit, torn state, contract blast radius); findings
   folded in below, open points in section 8
+- approval walkthrough: 2026-10-03, each of the seven decisions and the four
+  open points re-read one at a time with the user; decisions confirmed as
+  stated, open points 1 to 3 resolved (section 8), open point 4 left as the
+  consumers' follow-up
 
 ## 1. Problem and scope
 
@@ -74,10 +79,10 @@ response body, so it needs an amendment when WS-17 is approved.
 
 So the driver's compile-time dependency is in place and the runtime dependency
 is not. The driver's own `package.json` moves with it: the was-client
-devDependency is already `^0.87.0` (on 0.x a caret pins the minor), the peer
-range moves from `>=0.85.0 <1.0.0` to a floor at 0.87.0, and the
-`was-teaching-server` devDependency from `link:` to the registry release that
-ships WAS-172 and WAS-182. The CHANGELOG entry names the was-client floor.
+devDependency moves to `^0.87.1` (on 0.x a caret pins the minor), the peer range
+moves from `>=0.85.0 <1.0.0` to a floor at 0.87.1, and the `was-teaching-server`
+devDependency from `link:` to the registry release that ships WAS-172 and
+WAS-182. The CHANGELOG entry names the was-client floor.
 
 ## 2. Invariant inventory
 
@@ -239,10 +244,9 @@ reads the RxDB schema `version` and is unaffected.
 Shared packages:
 
 - was-client: already reshaped in the released 0.87.0 (section 1). The driver
-  needs one more thing from it: a re-export of `ResourceMetaStamp` (and
-  `WriteStamp`) from `./sync`, so the driver aliases the type rather than
-  declaring one. The 0.87.0 CHANGELOG entry is the was-client item; no new one
-  is filed.
+  needs one more thing from it: a re-export of `ResourceMetaStamp` and
+  `WriteStamp` from `./sync`, so the driver aliases the type rather than
+  declaring one; that is the 0.87.1 patch release (section 8).
 - storage-core: shipped in 0.28.0; `unaffected` beyond that release.
 - was-teaching-server: ships the model under WAS-172 and the feed under WAS-182.
   Its ROADMAP WAS-172 `touches:` already names "was-sync: the apply comparison".
@@ -368,7 +372,7 @@ Schema (`src/syncedDocSchema.ts`). `version` and `metaVersion` are deleted.
 `updatedAtCounter: { type: 'integer', minimum: 0 }` and
 `originId: { type: 'string', maxLength: 64 }` are added at the top level. `meta`
 is added as a nested object with `updatedAt` (string, 64), `updatedAtCounter`
-(integer, minimum 0), `originId` (string, 64), and `generation` (string, 256),
+(integer, minimum 0), `originId` (string, 64), and `generation` (string, 64),
 all four `required`. `required` at the top becomes `['id', 'updatedAt']`. The
 `updatedAt` index stays. The RxDB schema `version` stays `0`. The module header
 says plainly that the schema is documentation unless a consumer registers a
@@ -457,12 +461,14 @@ separate):
    known revision". Recommended as stated.
 3. Counters are `type: 'integer', minimum: 0`, matching the server's shape-check
    (safe non-negative integers). `maxLength`s: `originId` 64 (the server's
-   charset is `[A-Za-z0-9_-]{1,64}`), `meta.updatedAt` 64, `meta.generation` 256
-   pending the server's actual mint length. The existing `etag` / `metaEtag`
-   `maxLength` 256 must also hold the four-segment validator (generation plus up
-   to 13 digits of `ms`, the counter, 64 of origin, three dots, two quotes),
-   which it does only if `generation` stays well under 170; confirm with the
-   same answer.
+   charset is `[A-Za-z0-9_-]{1,64}`), `meta.updatedAt` 64, `meta.generation` 64
+   (the server mints eight random bytes base58-encoded, about eleven characters,
+   `src/lib/etag.ts` `newGeneration`; 64 matches `originId` and leaves a wide
+   margin). The existing `etag` / `metaEtag` `maxLength` 256 holds the
+   four-segment validator: eleven of generation, 13 digits of `ms`, 16 of
+   counter, 64 of origin, three dots, two quotes is 109 at worst (section 8).
+   The bounds describe the server and are not enforced here; a longer server
+   mint would need a matching schema edit that no test catches.
 4. The `/meta` create-or-update choice keys on the assumed primary not being a
    tombstone and carrying `meta` or `metaEtag`. Recommended over `meta` alone
    (misroutes the post-ack, pre-echo state as a create) and over `metaEtag`
@@ -480,9 +486,9 @@ separate):
   / `metaGeneration` top-level members. Rejected: every mapping would need a
   per-member translation in both directions, the echo would no longer be
   byte-equal to the stored row, and WAS-96 settled the nested shape on the
-  change document, the sidecar, and the served `/meta` object. Do-not-reopen
-  candidate; revisit if RxDB's schema handling or an index need forces a flat
-  member.
+  change document, the sidecar, and the served `/meta` object. Recorded as
+  do-not-reopen in decisions/0002; revisit if RxDB's schema handling or an index
+  need forces a flat member.
 - Store `meta` stripped of `generation`. Rejected: the driver never reads
   `generation`, but stripping it makes the stored `meta` differ from the wire
   `meta`, and a canonical comparison in `statesEqual` is the point of storing
@@ -554,25 +560,25 @@ separate):
   the stamps say; a `local` win returns the edited row with its stale triple.
 - `test/node/replication.integration.test.ts`: against the registry server
   release that ships WAS-172 and WAS-182, a created row ends with the server's
-  `updatedAtCounter` and `originId` after the echo; a `/meta` write lands the
-  nested `meta`; a `custom` edit made after the `/meta` ack and before the echo
-  is pushed with `If-Match` and no `412`; a validator-only `412` (another
-  replica re-writes an equal body) resolves `local` and re-pushes against the
-  fresh `etag`; a resurrection over a feed tombstone sends the `/meta` half as
-  `If-None-Match: *`; the `/meta`-only write's effect on the top-level
-  `updatedAt` is asserted whichever way section 8 settles it; the existing
-  conflict, tombstone, and benign-412 cases stay green with their `version`
-  assertions rewritten. The suite also uses `version` as a synchronization
-  barrier, and each barrier is rewritten by purpose, not mechanically: the
-  "write-back landed" wait (`:341`) keys on `etag` presence, since the ack is
-  etag-only; the "echo landed" waits (`:548`, `:639`) key on `updatedAtCounter`
-  and `originId` being defined and equal to the primary's, since the echo is the
-  stamp's only source; the recreate-over-tombstone discriminators (`:941-956`)
-  compare `etag`s or the counter-and-origin pair, since no integer orders them.
-  The "validators carry no revision" case (`:964-990`), whose wrapper strips
-  `version` / `metaVersion` off the primary, would pass vacuously and is
-  reframed to strip `updatedAtCounter`, `originId`, and `meta` (the hidden-stamp
-  primary).
+  `updatedAtCounter` and `originId` after the echo, and no `meta` until a
+  `/meta` write; a `/meta` write lands the nested `meta`; a `custom` edit made
+  after the `/meta` ack and before the echo is pushed with `If-Match` and no
+  `412`; a validator-only `412` (another replica re-writes an equal body)
+  resolves `local` and re-pushes against the fresh `etag`; a resurrection over a
+  feed tombstone sends the `/meta` half as `If-None-Match: *`; the `/meta`-only
+  write's effect on the top-level `updatedAt` is asserted whichever way section
+  8 settles it; the existing conflict, tombstone, and benign-412 cases stay
+  green with their `version` assertions rewritten. The suite also uses `version`
+  as a synchronization barrier, and each barrier is rewritten by purpose, not
+  mechanically: the "write-back landed" wait (`:341`) keys on `etag` presence,
+  since the ack is etag-only; the "echo landed" waits (`:548`, `:639`) key on
+  `updatedAtCounter` and `originId` being defined and equal to the primary's,
+  since the echo is the stamp's only source; the recreate-over-tombstone
+  discriminators (`:941-956`) compare `etag`s or the counter-and-origin pair,
+  since no integer orders them. The "validators carry no revision" case
+  (`:964-990`), whose wrapper strips `version` / `metaVersion` off the primary,
+  would pass vacuously and is reframed to strip `updatedAtCounter`, `originId`,
+  and `meta` (the hidden-stamp primary).
 - `test/browser/wasSync.spec.ts`: fixtures drop `version`; the winner
   discriminator becomes the payload's `updatedAt` (or `etag`), so the smoke
   still proves the resolver ran.
@@ -601,18 +607,47 @@ Resolved on 2026-10-03, after the review pass:
   as the deleting request's label (storage-core 0.28.0's `ChangeDocument`
   JSDoc), so invariant 17's "upheld" holds.
 
-Still open:
+Resolved on 2026-10-03, in the approval walkthrough:
 
-- Whether `meta` is present on a feed document only once metadata has been
-  written. The design assumes so (the `If-None-Match: *` create path depends on
-  it). Owner: confirm against the WAS-182 feed shape.
-- `meta.generation` length, and with it whether `etag` / `metaEtag` `maxLength`
-  256 still holds the four-segment validator. Owner: the user, against the
-  server's mint once WAS-172 lands.
-- The was-client re-export of `ResourceMetaStamp` and `WriteStamp` from
-  `./sync`. Owner: the user, as an in-house was-client change (0.87.0 shipped
-  without it, so a patch release).
+- `meta` is present on a feed document only once metadata has been written.
+  Confirmed in the contract the server implements against: storage-core 0.28.0's
+  `ChangeDocument` documents `meta` as present "once metadata has been written"
+  and `metaEtag` as "absent until metadata has been written", and WAS-96
+  invariant 3 makes the `/meta` object a record of its own, created by the first
+  metadata write. The `If-None-Match: *` create path rests on it. Verified at
+  integration against the WAS-182 release: the test plan's "a `/meta` write
+  lands the nested `meta`" case gains its negative, a freshly created row that,
+  after its echo, carries `updatedAtCounter` and `originId` and no `meta`. No
+  driver-side defense (an empty `meta` read as absent); that would be the
+  boundary guard decision 7 rejects and would mask a server contract violation.
+- `meta.generation` length. The server mints eight random bytes base58-encoded,
+  about eleven characters (`src/lib/etag.ts` `newGeneration`), and WAS-96 keeps
+  the mint under WAS-172. The four-segment validator is at worst 109 characters
+  (11 generation, 13 `ms`, 16 counter, 64 origin, five of punctuation), so
+  `etag` / `metaEtag` stay at `maxLength` 256. `meta.generation` is tightened
+  from 256 to 64, matching `originId` (decision 3 amended). The bound rests on
+  the server keeping the eight-byte mint and no validator runs to catch a
+  change, which the schema's module header says.
+- The was-client re-export. Still missing in 0.87.0: the `./sync` type export
+  list (`src/sync/index.ts:97-107`) carries `MasterState` and `WriteAck` but
+  neither stamp type, although `MasterState.meta` already references
+  `ResourceMetaStamp`. Both `ResourceMetaStamp` and `WriteStamp` are re-exported
+  in a was-client patch release (0.87.1), the second so the write-back's unit
+  rule and WS-17's grown ack can name the top-level triple without a further
+  release. The driver's was-client floor is 0.87.1, and the release is the first
+  implementation step rather than a design question. Not
+  `NonNullable<MasterState['meta']>`: it names the type by where it appears, and
+  breaks when `MasterState` reshapes.
+
+Still open, as a consumer follow-up and not blocking this doc:
+
 - How freewallet and was-react forget a replica together with its
-  `rx-replication-meta-*` instance (a `removeCollectionStorages` of both, or a
-  new `replicationIdentifier`). Owner: each consumer's follow-up; this doc only
-  states the requirement.
+  `rx-replication-meta-*` instance. Neither consumer touches
+  `replicationIdentifier` or `removeCollectionStorages` today. Two mechanisms:
+  remove both storages explicitly, or change the `replicationIdentifier`, for
+  which the controller already exposes a per-collection hook
+  (`src/controller.ts:201`), orphaning the old meta instance. Owner: each
+  consumer's follow-up; this doc states the requirement only. A driver-side
+  default that folds a schema generation into the identifier was considered and
+  set aside: it changes an identifier every consumer's storage holds and is its
+  own roadmap item with its own short design, not a rider on this one.

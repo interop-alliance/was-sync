@@ -28,6 +28,11 @@
   entry. Follows was-client 0.86.0, where `WriteAck.version` and
   `MasterState.version` are optional (WS-18).
 
+### Changed
+
+- Tests: the integration suite boots through `was-teaching-server/testing`
+  (`startTestServer`, `openTempBackend`), against the server's 0.40.0 release.
+
 ## 0.7.0 - 2026-10-01
 
 ### Changed

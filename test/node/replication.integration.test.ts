@@ -15,14 +15,10 @@
  * through a second, independent port on the same collection, so an assertion
  * about "what the server holds" never reads through the replica under test.
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import type { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createRxDatabase, type RxDatabase } from 'rxdb/plugins/core'
 import { getRxStorageMemory } from 'rxdb/plugins/storage-memory'
-import { createApp, FileSystemBackend } from 'was-teaching-server'
+import { openTempBackend, startTestServer } from 'was-teaching-server/testing'
 import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
 import { WasClient } from '@interop/was-client'
 import {
@@ -40,8 +36,7 @@ import type { Json, WasSyncPort } from '../../src/types.js'
 // stable across runs; the data directory is fresh each run regardless.
 const SEED = new Uint8Array(32).map((_, index) => (index * 31 + 7) & 0xff)
 
-let dataDir: string
-let app: ReturnType<typeof createApp>
+let server: Awaited<ReturnType<typeof startTestServer>>
 let was: WasClient
 let spaceId: string
 let controllerDid: string
@@ -49,29 +44,25 @@ let db: RxDatabase | undefined
 let collectionSerial = 0
 
 beforeAll(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'was-sync-integration-'))
-  // The port is not known until `listen()` resolves, so the app boots against
-  // a placeholder base URL and `serverUrl` is corrected before the first
-  // request; zcap invocation targets embed it, so it must match exactly.
-  app = createApp({
-    serverUrl: 'http://localhost',
-    logger: false,
-    backend: new FileSystemBackend({ dataDir, capacityBytes: Infinity })
+  // The server owns the temp backend, so closing it removes the data dir.
+  // Zcap invocation targets embed the port, so the client is built from the
+  // `serverUrl` the boot returns.
+  server = await startTestServer({
+    backend: await openTempBackend({
+      prefix: 'was-sync-integration-',
+      capacityBytes: Infinity
+    })
   })
-  await app.listen({ port: 0 })
-  const serverUrl = `http://localhost:${(app.server.address() as AddressInfo).port}`
-  app.serverUrl = serverUrl
+  const { serverUrl } = server
 
   const keyPair = await Ed25519VerificationKey.generate({ seed: SEED })
   controllerDid = `did:key:${keyPair.fingerprint()}`
-  keyPair.id = `${controllerDid}#${keyPair.fingerprint()}`
-  was = WasClient.fromSigner({ serverUrl, signer: keyPair.signer() })
+  was = WasClient.fromSigner({ serverUrl, signer: keyPair.didKeySigner() })
   spaceId = deriveSpaceId(controllerDid)
 })
 
 afterAll(async () => {
-  await app.close()
-  await rm(dataDir, { recursive: true, force: true })
+  await server.fastify.close()
 })
 
 afterEach(async () => {

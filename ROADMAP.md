@@ -29,17 +29,17 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 - labels: schema, push, pull, conflict, breaking, was-96
 - blocked-by: WS-24
 - design: designs/WS-23-stamp-data-model.md
-- design-approved:
+- design-approved: 2026-10-03
 - touches:
   - was-sync (ARCHITECTURE.md invariants 4, 7, 18, Glossary `Ack`, README,
     CHANGELOG breaking note)
   - was-client (the sync port's `WireDoc`, `MasterState`, and `WriteAck` drop
     `version` / `metaVersion` for the stamp members; `parseEtag` is retired or
     reads the new layout; ARCHITECTURE/AGENTS)
-  - was-teaching-server (ships the model under WAS-172 and the widened feed
-    under WAS-182; the integration suite here follows its registry release;
-    WAS-96 needs a wire item for the write response body and a sentence that a
-    `/meta`-only write leaves the content `updatedAt` unchanged)
+  - was-teaching-server: WAS-189 (the write response body as a WAS-96 wire
+    item), WAS-190 (a `/meta`-only write leaves the content stamp unchanged),
+    filed 2026-10-03; the model ships under WAS-172 and the widened feed under
+    WAS-182, and the integration suite here follows the registry release
   - storage-core (`WriteStamp`, `ResourceMetaStamp`, the reshaped
     `ChangeDocument`; shipped in 0.28.0, 2026-10-03)
   - was-conformance-suite (a "Parties to this contract" row; its feed cases
@@ -289,9 +289,9 @@ be stated.
     resurrection records fresh `createdBy` / `createdAt`; `StorageBackend` write
     return types widen, breaking for custom backends, WAS-3 and WAS-18 affected;
     ARCHITECTURE/AGENTS, CHANGELOG breaking note)
-  - was-teaching-server, again, for WAS-96: the write response body and the
-    WAS-172 stamp members (`updatedAt`, `updatedAtCounter`, `originId`, the
-    nested `meta` object) are one body shape, settled once
+  - was-teaching-server: WAS-189, filed 2026-10-03 (the write response body
+    carries the WAS-172 stamp members and the provenance, one body shape settled
+    once; it also carries this item's statuses and resurrection rule)
   - was-conformance-suite (six strict-`204` sites accept `201` / `200` / `204`
     and check the body shape; ships before the server; ARCHITECTURE/AGENTS)
   - wallet-attached-storage-spec (both operation bullets, the four examples, the
