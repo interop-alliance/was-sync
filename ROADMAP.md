@@ -75,35 +75,6 @@ that adopts a remote whose body equals the local one. Since this changes the
 mechanism invariant 4 documents, the item is design-gated. The design doc is not
 yet written.
 
-### WS-7: Ack write-back accepts version 0
-
-- status: todo
-- priority: medium
-- labels: push, ack, was-client-port
-- touches:
-  - was-client (`putContent` / `deleteContent` resolve
-    `readContent(id)?.version ?? 0` when the ETag is hidden; the contract should
-    reject or signal, not fall back to 0)
-  - was-sync (ARCHITECTURE.md ack section)
-- acceptance:
-  - [ ] The ack guard in `src/wasReplication.ts` (around line 44) rejects 0 as
-        well as undefined, and states in a comment that 0 is never a legitimate
-        revision
-  - [ ] was-client's port no longer resolves a fabricated 0 when the ETag header
-        is not exposed (in-house change; reference the was-client item)
-  - [ ] A test with a port that resolves 0 shows the local row's version left
-        untouched and no 412 on the following edit
-  - [ ] `touches:` entries resolved
-
-Context: The ack write-back stamps any number that is not undefined. was-client
-never resolves undefined: when a cross-origin server does not expose the ETag
-header, it falls back to version 0. was-react's deployment
-(`feedPrimaryRead: true`, cross-origin) is exactly this case. Every accepted
-write acks 0, the local row is patched to 0, the next edit sends `If-Match "0"`,
-412s, the feed re-read repairs it, and the row re-pushes. Every edit costs an
-extra 412, a feed walk, and a conflict resolution. `withFeedPrimaryRead` wraps
-only `get`, leaving the ack path exposed to the same bug its header describes.
-
 ### WS-8: Status reports `synced` before any pull or push has run
 
 - status: todo

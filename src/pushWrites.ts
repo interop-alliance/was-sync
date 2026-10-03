@@ -189,7 +189,10 @@ function primaryOrTombstone({
   const conflict: WithDeleted<SyncedDoc> = {
     id,
     updatedAt: primary.updatedAt,
-    version: primary.version,
+    // An opaque validator carries no parseable revision; `0` is the row's
+    // "no server revision known" value, and `etag` is what the next
+    // conditional write echoes.
+    version: primary.version ?? 0,
     // An absent `deleted` is a live resource: a port whose `get` resolves
     // `null` for a tombstone (the client's own read) never sets the member,
     // and the `primary === null` branch above is that port's tombstone.
@@ -248,8 +251,13 @@ async function pushRow({
   const ack: PushWriteAck = { id }
   // Spread into every write, so a replication run without a label sends none.
   const attribution = writerId !== undefined ? { writerId } : {}
+  // An accepted write under an opaque validator acks an `etag` with no
+  // revision, so the validator alone counts as acked state.
   const hasAck = () =>
-    ack.version !== undefined || ack.metaVersion !== undefined
+    ack.version !== undefined ||
+    ack.etag !== undefined ||
+    ack.metaVersion !== undefined ||
+    ack.metaEtag !== undefined
 
   // Re-reads this row's primary. A row that has ALREADY written this batch
   // (a content write accepted before a `/meta` rejection) bypasses the batch
@@ -370,7 +378,7 @@ async function pushRow({
           ack.etag = ackedDelete.etag
         }
       }
-      return { conflict: null, ack: ack.version !== undefined ? ack : null }
+      return { conflict: null, ack: hasAck() ? ack : null }
     }
 
     // Content half: write on create, or when the content body changed. For a

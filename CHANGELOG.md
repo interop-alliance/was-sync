@@ -17,6 +17,16 @@
   `updatedAt` and never received the server-assigned `createdBy`. A consumer
   that overrode `isEqual` with a deep equality to get this behavior can drop the
   override (WS-6).
+- The ack write-back no longer stamps a `version` or `metaVersion` of `0`.
+  was-client's port acks `0` when the `ETag` is hidden from a cross-origin
+  caller or carries no revision. The row now keeps its last real revision until
+  the feed's echo brings the new one down (WS-7).
+- An accepted write whose `ETag` carries no parseable revision is now acked on
+  its `etag` / `metaEtag` alone, so the next conditional write echoes the
+  validator. The push handler previously reported such a write as having no ack.
+  A `412` re-read under such a validator reports `version: 0` in the conflict
+  entry. Follows was-client 0.86.0, where `WriteAck.version` and
+  `MasterState.version` are optional (WS-18).
 
 ## 0.7.0 - 2026-10-01
 

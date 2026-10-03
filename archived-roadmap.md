@@ -649,3 +649,74 @@ defers an echo pulled between the write-back and the push cycle it triggers, and
 never pulls it again. Closing that needs a reshaped ack path, so it is split out
 as WS-17. Until then, both integration cases wait for pushes to settle before
 they nudge a pull.
+
+### WS-7: Ack write-back accepts version 0
+
+- status: done
+- done: 2026-10-02
+- priority: medium
+- labels: push, ack, was-client-port
+- touches:
+  - was-client: WCL-75, implemented 2026-10-02 (`putContent` / `deleteContent`
+    resolve `readContent(id)?.version ?? 0` when the ETag is hidden; the
+    contract should reject or signal, not fall back to 0)
+  - was-sync (ARCHITECTURE.md ack section): shipped here (the Ack glossary entry
+    states the `0` rejection and why; invariant 18 notes the echo then differs
+    in `version`)
+- acceptance:
+  - [x] The ack guard in `src/wasReplication.ts` (around line 44) rejects 0 as
+        well as undefined, and states in a comment that 0 is never a legitimate
+        revision
+  - [x] was-client's port no longer resolves a fabricated 0 when the ETag header
+        is not exposed (in-house change; reference the was-client item)
+  - [x] A test with a port that resolves 0 shows the local row's version left
+        untouched and no 412 on the following edit
+  - [x] `touches:` entries resolved
+
+Context: The ack write-back stamped any `version` that was not undefined.
+was-client's port never resolved undefined: when a revision could not be read
+off the response, it fell back to `version: 0`. That happens when a cross-origin
+server does not expose the `ETag` header, and when the `ETag` is a
+spec-conformant opaque validator such as `"a1b2c3"` rather than the reference
+server's `gen.version` form. was-react's deployment (`feedPrimaryRead: true`,
+cross-origin) is the first case. The row then recorded an invented revision in
+place of its last real one, which the feed's echo of the write had to repair.
+The conditional write itself is built from the stored `etag`, so the `0` did not
+reach `If-Match`. The repeated 412 on every edit under a hidden `ETag` comes
+from the ack carrying no `etag` at all, so the row keeps its stale validator.
+That part is not curable in this driver. It needs the server to expose `ETag`
+cross-origin, and was-client to leave the revision absent rather than fabricate
+one (WCL-75). This item's own guard keeps a `0` out of the local row, and the
+was-client follow-up removes the fabrication at its source. The original premise
+that the edit sent `If-Match "0"` was wrong and is corrected here.
+`withFeedPrimaryRead` wraps only `get`, so it does not touch the ack path.
+
+### WS-18: Consume an absent primary `version` from was-client 0.86.0
+
+- status: done
+- done: 2026-10-02
+- priority: medium
+- labels: push, conflict, was-client-port, schema
+- acceptance:
+  - [x] `src/pushWrites.ts` compiles against was-client 0.86.0 and the conflict
+        assembler gives a primary with no `version` a defined local value with a
+        comment stating what that value means
+  - [x] A delete ack that carries an `etag` but no `version` is still reported
+        as an ack, so the `etag` reaches the ack write-back
+  - [x] The integration suite has a case driven by a port whose `get`, `put`,
+        and `delete` return an opaque validator and no `version`, and the row
+        edits twice with no 412
+  - [x] ARCHITECTURE.md states which local `version` value stands for "no known
+        revision" and how it relates to the ack rule from WS-7
+
+Context: was-client 0.86.0 (WCL-75) stops substituting `version: 0` when the
+`ETag` carries no parseable revision. `WriteAck.version` and
+`MasterState.version` are now optional. This driver's local row keeps `version`
+required (`src/types.ts`, `src/syncedDocSchema.ts`), and the conflict assembler
+copies `primary.version` into it at `src/pushWrites.ts` (around line 192), which
+is a type error against 0.86.0. The delete path at `src/pushWrites.ts` (around
+line 373) reports an ack only when `version` is defined, so an opaque
+validator's `etag` is dropped and the next delete-related write sends a stale
+precondition. The driver already uses `0` as its own "fresh or tombstoned row"
+value, and WS-7 made the ack write-back skip `0`, so the two conventions need to
+be stated together. discovered-from: WS-7, via WCL-75.

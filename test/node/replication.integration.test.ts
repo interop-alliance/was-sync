@@ -938,7 +938,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       ifNoneMatch: true,
       writerId: 'writer-b'
     })
-    expect(recreated.version).toBeGreaterThan(own!.version)
+    expect(recreated.version!).toBeGreaterThan(own!.version!)
 
     await (await collection.findOne('cid-recreated').exec())!.remove()
     // The delete is refused and resolved rather than re-issued: the local row
@@ -955,6 +955,97 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     expect(primary).not.toBeNull()
     expect(primary!.version).toBe(recreated.version)
     expect(primary!.writerId).toBe('writer-b')
+
+    await replication.cancel()
+  })
+
+  it('edits twice with no 412 over a port whose validators carry no revision', async () => {
+    // A spec-conformant server may send an `ETag` with no parseable revision,
+    // so the port acks and reads back an `etag` with no `version`. The driver
+    // must then run on the validator alone: each ack's `etag` is written back
+    // and echoed as the next write's `If-Match`. The wrapper below hides every
+    // revision the real port parsed, leaving the validators as they are, and
+    // withholds the feed, so the validator can reach the row only through the
+    // ack write-back and not through the echo.
+    const { port: real, observer } = await openServerCollection()
+    let conflicts = 0
+    const opaque: WasSyncPort = {
+      async query() {
+        return { documents: [], checkpoint: null }
+      },
+      async get(options) {
+        const primary = await real.get(options)
+        if (primary === null) {
+          return null
+        }
+        const { version: _v, metaVersion: _m, ...rest } = primary
+        return rest
+      },
+      async putContent(options) {
+        try {
+          const { etag } = await real.putContent(options)
+          return etag !== undefined ? { etag } : {}
+        } catch (err) {
+          if (isSyncConflictError(err)) {
+            conflicts += 1
+          }
+          throw err
+        }
+      },
+      async putMeta(options) {
+        const acked = await real.putMeta(options)
+        if (acked === undefined) {
+          return undefined
+        }
+        return acked.etag !== undefined ? { etag: acked.etag } : {}
+      },
+      async deleteContent(options) {
+        const acked = await real.deleteContent(options)
+        if (acked === undefined) {
+          return undefined
+        }
+        return acked.etag !== undefined ? { etag: acked.etag } : {}
+      }
+    }
+    const collection = await openCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: opaque,
+      replicationIdentifier: 'test-opaque-etag'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-opaque',
+      updatedAt: '000000000001',
+      version: 0,
+      data: { step: 'local-1' }
+    })
+    await eventually(
+      async () => committed(await observer.get({ id: 'cid-opaque' })),
+      () => replication.reSync()
+    )
+
+    for (const step of ['local-2', 'local-3']) {
+      const row = await collection.findOne('cid-opaque').exec()
+      await row!.incrementalPatch({
+        data: { step },
+        updatedAt: step === 'local-2' ? '000000000002' : '000000000003'
+      })
+      await eventually(
+        async () =>
+          stepOf((await observer.get({ id: 'cid-opaque' }))?.data) === step,
+        () => replication.reSync()
+      )
+      // The acked validator reaches the row with no feed to carry it.
+      await eventually(async () => {
+        const primary = await observer.get({ id: 'cid-opaque' })
+        const current = await collection.findOne('cid-opaque').exec()
+        return current?.get('etag') === primary?.etag
+      })
+    }
+
+    expect(conflicts).toBe(0)
 
     await replication.cancel()
   })

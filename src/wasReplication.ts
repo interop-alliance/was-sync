@@ -23,14 +23,31 @@ import { createPushHandler, type PushWriteAck } from './pushWrites.js'
 import { log } from './log.js'
 
 /**
+ * Whether an acked revision is one the server really assigned. A WAS
+ * resource's first revision is `1`, so an absent value and `0` both mean the
+ * port could not read a revision off the response.
+ *
+ * @param version {number | undefined}
+ * @returns {boolean}
+ */
+function isRevision(version: number | undefined): version is number {
+  return version !== undefined && version > 0
+}
+
+/**
  * Builds the push write-back: patches an accepted write's acked server state
  * (`version` / `etag` and/or `metaVersion` / `metaEtag`) into the local row so
  * the next conditional write's `If-Match` echoes what the server last
  * reported. Skips rows that are gone or already current (a tombstoned row is
  * invisible to `findOne` and needs no write-back -- nothing further is pushed
- * for a deleted id). A failure is logged at `warn` and swallowed: the write
- * itself succeeded, and a missed write-back only means the acked state is
- * adopted from the change feed's echo on a later pull.
+ * for a deleted id). An acked revision of `0` is skipped like an absent one:
+ * a WAS resource's first revision is `1`, so `0` is never a real revision.
+ * It is the port's fallback for an `ETag` it could not read (hidden from a
+ * cross-origin caller) or could not parse a revision out of. Stamping it would
+ * overwrite the row's last real revision with a made-up one. A failure is
+ * logged at `warn` and swallowed: the write itself succeeded, and a missed
+ * write-back only means the acked state is adopted from the change feed's echo
+ * on a later pull.
  *
  * @param rxCollection {RxCollection<SyncedDoc>}
  * @returns {(ack: PushWriteAck) => Promise<void>}
@@ -43,14 +60,16 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
         return
       }
       const patch: Partial<SyncedDoc> = {}
-      if (ack.version !== undefined && doc.get('version') !== ack.version) {
+      // `0` is never a legitimate revision (a WAS resource starts at `1`); it
+      // is the port's fallback for a hidden or unparseable `ETag`.
+      if (isRevision(ack.version) && doc.get('version') !== ack.version) {
         patch.version = ack.version
       }
       if (ack.etag !== undefined && doc.get('etag') !== ack.etag) {
         patch.etag = ack.etag
       }
       if (
-        ack.metaVersion !== undefined &&
+        isRevision(ack.metaVersion) &&
         doc.get('metaVersion') !== ack.metaVersion
       ) {
         patch.metaVersion = ack.metaVersion

@@ -81,9 +81,11 @@ function fakePushPort(
     primary?: PrimaryState | null
     getRejectsWith?: unknown
     ackWrites?: boolean
+    opaqueEtags?: boolean
   } = {}
 ): WasSyncPort & { writes: WriteCall[]; getCalls: string[] } {
   const ackWrites = options.ackWrites ?? true
+  const opaqueEtags = options.opaqueEtags ?? false
   const writes: WriteCall[] = []
   const getCalls: string[] = []
   const versions = new Map<string, number>()
@@ -102,9 +104,14 @@ function fakePushPort(
   // A real write always acks at least the new version (the server's
   // fallback re-read finds it even with no ETag header); `ackWrites: false`
   // withholds only the etag, modeling a backend that exposes no `ETag`.
+  // `opaqueEtags: true` acks only the etag, modeling a validator with no
+  // parseable revision in it.
   const bump = (revisions: Map<string, number>, id: string): WriteAck => {
     const next = (revisions.get(id) ?? 0) + 1
     revisions.set(id, next)
+    if (opaqueEtags) {
+      return { etag: etagFor(next) }
+    }
     return ackWrites
       ? { version: next, etag: etagFor(next) }
       : { version: next }
@@ -704,6 +711,33 @@ describe('createPushHandler write acks', () => {
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
 
     expect(acks).toEqual([{ id: 'r1', version: 1 }])
+  })
+
+  it('reports an etag-only ack when the validator carries no revision', async () => {
+    // A spec-conformant server may send an opaque `ETag` the port cannot
+    // parse a revision out of. The validator is still the acked state the
+    // next conditional write must echo, so the ack is reported without a
+    // `version`.
+    const port = fakePushPort({ opaqueEtags: true })
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          data: { a: 1 },
+          custom: { tag: 'x' }
+        })
+      }
+    ])
+
+    expect(acks).toEqual([{ id: 'r1', etag: etagFor(1), metaEtag: etagFor(1) }])
   })
 
   it('does not report an ack for a rejected write', async () => {

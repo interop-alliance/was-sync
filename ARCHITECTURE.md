@@ -266,19 +266,21 @@ numbered so items and reviews can cite them.
     and the echo of this replica's own write is where that matters. By the time
     the echo arrives, the ack write-back has already stamped the row with the
     server's `version` and `etag`. What is left to differ is what the server
-    alone assigns, namely `createdBy` and the server's `updatedAt`. An equality
-    limited to the bodies and revisions let RxDB skip the echo. Every row a
-    replica created then kept the client's `updatedAt` and never learned its
-    `createdBy`. A consumer that injects its own `isEqual` takes on the same
-    requirement. One timing window remains, tracked as WS-17. RxDB defers a
-    pulled state for a row whose local state differs from its assumed primary,
-    and the pull checkpoint still moves past it, so the deferred state is never
-    pulled again. The ack write-back is a plain local write, so the row is in
-    that state until the push cycle it triggers has run. An echo pulled inside
-    that window is dropped whatever `isEqual` says. The window holds no HTTP
-    round trip, so a polling pull rarely lands in it, but a pull nudged right
-    after a push does. The integration suite therefore waits for pushes to
-    settle before it nudges a pull.
+    alone assigns, namely `createdBy` and the server's `updatedAt`. An ack whose
+    revision is absent or `0` stamps no `version` (see Ack in the Glossary), so
+    its echo differs in `version` as well. An equality limited to the bodies and
+    revisions let RxDB skip the echo. Every row a replica created then kept the
+    client's `updatedAt` and never learned its `createdBy`. A consumer that
+    injects its own `isEqual` takes on the same requirement. One timing window
+    remains, tracked as WS-17. RxDB defers a pulled state for a row whose local
+    state differs from its assumed primary, and the pull checkpoint still moves
+    past it, so the deferred state is never pulled again. The ack write-back is
+    a plain local write, so the row is in that state until the push cycle it
+    triggers has run. An echo pulled inside that window is dropped whatever
+    `isEqual` says. The window holds no HTTP round trip, so a polling pull
+    rarely lands in it, but a pull nudged right after a push does. The
+    integration suite therefore waits for pushes to settle before it nudges a
+    pull.
 
 ## Ownership heuristics
 
@@ -350,7 +352,23 @@ the byoe-ecosystem layer map instead.
   result, rejection.
 - **Ack** -- the server revision and opaque `ETag` an accepted write earned
   (`PushWriteAck`), written back into the local row so the next conditional
-  write's `If-Match` echoes what the server holds. Avoid: receipt, confirmation.
+  write's `If-Match` echoes what the server holds. The write-back
+  (`createAckWriteBack` in `src/wasReplication.ts`) stamps a `version` or
+  `metaVersion` only when it is a real revision. An absent value and `0` are
+  both skipped. A WAS resource's first revision is `1`, so `0` is never assigned
+  by a server. It is was-client's fallback for an `ETag` the port could not read
+  (hidden from a cross-origin caller) or could not parse a revision out of.
+  Stamping it would replace the row's last real revision with an invented one.
+  The row keeps that revision until the feed's echo brings the real one down. An
+  `etag` or `metaEtag` the ack does carry is still stamped, and an ack carrying
+  only a validator is still an ack: since was-client 0.86.0 the port sets no
+  `version` for an `ETag` with no parseable revision, so the push handler
+  reports a write accepted when any of the four members is present. The local
+  row's `version` stays required. `0` is its "no known revision" value: a fresh
+  row carries it, the tombstone conflict entry carries it, and a re-read primary
+  with no `version` is reported with it. The two rules meet here: the driver
+  writes `0` only where no revision is known, and the write-back never adopts a
+  `0` from the server. Avoid: receipt, confirmation.
 - **Echo** -- the `changes` feed entry for a write this replica pushed, pulled
   back down on a later cycle. It is the only way what the server alone assigns
   (`createdBy`, the server's `updatedAt`) reaches the local row, since the ack
