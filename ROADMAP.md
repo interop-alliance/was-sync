@@ -28,7 +28,7 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 - priority: high
 - labels: schema, push, pull, conflict, breaking, was-96
 - blocked-by: WS-24
-- design:
+- design: designs/WS-23-stamp-data-model.md
 - design-approved:
 - touches:
   - was-sync (ARCHITECTURE.md invariants 4, 7, 18, Glossary `Ack`, README,
@@ -36,14 +36,27 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
   - was-client (the sync port's `WireDoc`, `MasterState`, and `WriteAck` drop
     `version` / `metaVersion` for the stamp members; `parseEtag` is retired or
     reads the new layout; ARCHITECTURE/AGENTS)
-  - was-teaching-server (ships the model under WAS-172; the integration suite
-    here follows its registry release)
-  - wallet-core (the engine's `version > 0` create-or-update choice and the
-    remint's `version === 0` read, `src/sync/push.ts`, `src/sync/remint.ts`;
-    ARCHITECTURE/AGENTS)
-  - freewallet, was-react, dcw (each persists the replica schema; a reshaped
-    schema forgets every existing replica; dcw's own `version` / `metaVersion`
-    columns)
+  - was-teaching-server (ships the model under WAS-172 and the widened feed
+    under WAS-182; the integration suite here follows its registry release;
+    WAS-96 needs a wire item for the write response body and a sentence that a
+    `/meta`-only write leaves the content `updatedAt` unchanged)
+  - storage-core (`WriteStamp`, `ResourceMetaStamp`, the reshaped
+    `ChangeDocument`; shipped in 0.28.0, 2026-10-03)
+  - was-conformance-suite (a "Parties to this contract" row; its feed cases
+    assert `metaVersion` and fail against a WAS-172 server; ships before the
+    server)
+  - wallet-attached-storage-spec (the `changes` profile and tie-break text still
+    describe `version` / `metaVersion`; the stamp text is WAS-96's spec work)
+  - wallet-core (the `ack.version` sites stop compiling against was-client
+    0.87.0, and the `replica.version > 0` / `=== 0` reads in `src/sync/push.ts`
+    and `src/sync/remint.ts` become a silent never-acked state; the engine needs
+    a durable acked flag of its own; ARCHITECTURE/AGENTS)
+  - freewallet, was-react (each persists the replica schema and inserts rows
+    with `version: 0`; a reshaped schema forgets every existing replica, which
+    must take the replication meta with it; ARCHITECTURE/AGENTS)
+  - dcw (not a was-sync consumer; drives wallet-core's engine over its own
+    SQLite `version` / `metaVersion` columns and fake ports returning
+    `{ version, etag }`)
 - acceptance:
   - [ ] `SyncedDoc` and the replica schema carry `updatedAtCounter`, `originId`,
         and the nested `meta` stamp in place of `version` / `metaVersion`, with
@@ -52,8 +65,11 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
         handler's routing and `hasAck`, the conflict and tombstone entries, the
         feed primary read, `statesEqual`, and the ack write-back, whose
         revision-`0` skip is removed with the member
-  - [ ] The ack write-back and the conflict entries stamp the same stamp members
-        the feed document carries, so an echo compares equal to an acked row
+  - [ ] The conflict entries carry the same stamp members the feed document
+        carries. The ack write-back stamps them once WS-17 puts the stamp in the
+        write response (decided 2026-10-03); this item lands against
+        was-client's `etag`-only ack with the echo as the stamp's source for
+        accepted writes
   - [ ] The default resolver's rules are unchanged and a test pins that rule 1
         and rule 2 compare bodies, not stamps
   - [ ] The integration suite runs against the server release that ships the
@@ -85,7 +101,14 @@ sentence is restated under WAS-96: stamped records order by
 for an unstamped local edit against a stamped remote. That is the only case this
 driver's conflict path sees (the local side never holds a server stamp), so
 `remotePayloadWins` stays valid, and the design records why rather than changing
-it. WS-17's ack body shape has to agree with this model (see WS-17).
+it. The design doc is at `reviewed` (2026-10-03) with its seven stored-shape
+decisions signed off. WS-17 follows this item and changes the ack: the write
+response body carries the full stamp beside `createdBy`, was-client's `WriteAck`
+grows to carry it, and the write-back stamps it under the unit rule the design
+fixes (the content ack supplies the top-level triple, the `/meta` ack supplies
+`meta`, neither partial). WAS-96 needs two amendments for this: a wire item for
+the write response body, and an explicit sentence that a `/meta`-only write
+leaves the content record's `updatedAt` unchanged.
 
 ### WS-24: Map the widened `changes` feed at the pull boundary
 
@@ -104,8 +127,14 @@ it. WS-17's ack body shape has to agree with this model (see WS-17).
   - [ ] The ownership of the `kind` filter and the `deleted` rename is settled
         with was-client, and recorded in both repos' ARCHITECTURE files
   - [ ] The pull handler and the feed primary read skip every change document
-        whose `kind` is not `resource`, and a `kind` they do not know, without
-        advancing past the batch
+        whose `kind` is not `resource`, and a `kind` they do not know. The pull
+        handler keeps following the server checkpoint until the page it hands
+        RxDB holds at least one resource document or the feed ends: RxDB drops
+        an empty page before persisting its checkpoint, so a page filtered to
+        zero would be re-fetched on every poll (found in the WS-23 review)
+  - [ ] A unit case drives the pull handler with an all-filtered page followed
+        by a resource page and asserts the resource page's checkpoint is the one
+        returned
   - [ ] A `kind: resource` entry whose `contentType` is not JSON (no inline
         `data`) takes a documented outcome: skipped, or stored as a bodiless row
   - [ ] The feed's `deleted` member reaches RxDB as `_deleted`, on the pulled
@@ -285,9 +314,11 @@ be stated.
     bump; its fake ports return `{ version, etag }` and the new members are
     optional)
 - acceptance:
-  - [ ] The write response body shape is reconciled with WAS-96's stamp members
-        before implementation (the design doc's section 8 question), and the ack
-        stamps the same members the feed document carries
+  - [ ] The write response body carries the record's full stamp (`updatedAt`,
+        `updatedAtCounter`, `originId`; the nested `meta` on a `/meta` write)
+        beside `createdBy` (decided 2026-10-03, the design doc's section 8
+        option a), was-client's `WriteAck` carries the same members, and the ack
+        write-back stamps them under WS-23's unit rule
   - [ ] `PushWriteAck` carries `updatedAt` / `createdBy` / `pushedUpdatedAt`,
         `pushRow` fills them from the port acks and the pushed row (the last
         `updatedAt` wins), and `hasAck` does not count the two members on their
@@ -354,11 +385,10 @@ body signed off here (`contentType`, `size`, `updatedAt`, `createdAt`,
 `updatedAt` with no counter or origin id, and the row would not compare equal to
 the feed echo once `statesEqual` compares stamp members. The acceptance boxes
 that name the row's `version` and the write-back's revision rules describe
-members WAS-96 removes. Two orderings: fold the stamp members into this item's
-body shape now, so the server changes its write response once; or land this item
-as designed and reshape it under WS-23. The first is the recommendation. Either
-way the body shape is a wire decision the two designs share, and the design
-doc's section 8 carries the question.
+members WAS-96 removes. Decided 2026-10-03: the stamp members are folded into
+this item's body shape, so the server changes its write response once, and WS-23
+lands first against the `etag`-only ack. The body shape is a wire decision the
+two designs share; WAS-96's wire inventory gains an entry for it.
 
 ### WS-19: `pushRow` never sees `_deleted` under a non-default `deletedField`
 

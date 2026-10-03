@@ -453,4 +453,12 @@ its server devDependency returns to a registry version.
   decided and reshape the body under WS-23. The name set is WAS-96's, so (a)
   adds no new wire names, but it changes what the two operation bullets list.
   Owner: the user, before implementation; the roadmap item carries an acceptance
-  box for it.
+  box for it. Decided 2026-10-03: option (a). The body carries `updatedAt`,
+  `updatedAtCounter`, `originId`, and on a `/meta` write the nested `meta`,
+  beside `createdBy`; was-client's `WriteAck` grows to carry them; the
+  write-back stamps them under WS-23's unit rule (the content ack supplies the
+  top-level triple whole or not at all, the `/meta` ack supplies `meta` whole or
+  not at all, nothing without a validator in the same ack). WS-23 lands first
+  against the `etag`-only ack. Section 5's revision rules (`version` absent or
+  `0`) and the forced-window test's `version` assertion are superseded by
+  WS-23's design doc. WAS-96 needs a wire item for the write response body.
