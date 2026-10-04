@@ -24,26 +24,48 @@ function emptyCache(): PrimaryReadCache {
 }
 
 /**
- * A fake base port that serves `pages` of the changes feed, one page per
- * `query` call. When `endless` is set, every page is full and always carries a
- * non-null checkpoint, so a scan never reaches the feed's end (models a feed
- * larger than the page-scan budget). The write methods are unused here.
+ * A fake base port that serves `pages` of the changes feed, honoring the
+ * checkpoint each `query` sends: no checkpoint serves the first page, and a
+ * page's resume checkpoint (its last document's `checkpoint`) serves the page
+ * after it. The final page ends the feed with `checkpoint: null`, or with
+ * `tailCheckpoint` when one is given (an empty final page carrying a resume
+ * position). A checkpoint the fake never issued rejects, so a walk that resumes
+ * from the wrong position fails loudly. When `endless` is set, every query
+ * answers the same full page with a non-null checkpoint, so a scan never
+ * reaches the feed's end (models a feed larger than the page-scan budget).
+ * Every query's arguments are recorded in `queries`. The write methods are
+ * unused here.
  */
 function fakeBasePort(
-  options: { pages?: WireDoc[][]; endless?: WireDoc[] } = {}
-): WasSyncBasePort & { queryCalls: number } {
+  options: {
+    pages?: WireDoc[][]
+    tailCheckpoint?: SyncCheckpoint
+    endless?: WireDoc[]
+  } = {}
+): WasSyncBasePort & {
+  queryCalls: number
+  queries: Array<{ checkpoint?: SyncCheckpoint; limit: number }>
+} {
   const pages = options.pages ?? []
-  const state = { queryCalls: 0 }
+  const queries: Array<{ checkpoint?: SyncCheckpoint; limit: number }> = []
+  // The resume checkpoint each page reports, keyed to the page it resumes at.
+  const pageAfter = new Map<SyncCheckpoint, number>()
+  pages.slice(0, -1).forEach((documents, index) => {
+    const last = documents[documents.length - 1]
+    if (last !== undefined) {
+      pageAfter.set(last.checkpoint, index + 1)
+    }
+  })
   return {
     get queryCalls() {
-      return state.queryCalls
+      return queries.length
     },
-    async query(): Promise<{
+    queries,
+    async query(args): Promise<{
       documents: WireDoc[]
       checkpoint: SyncCheckpoint | null
     }> {
-      const page = state.queryCalls
-      state.queryCalls++
+      queries.push(args)
       if (options.endless !== undefined) {
         const last = options.endless[options.endless.length - 1]!
         return {
@@ -51,14 +73,21 @@ function fakeBasePort(
           checkpoint: last.checkpoint
         }
       }
-      const documents = pages[page] ?? []
-      const last = documents[documents.length - 1]
-      // A final (or empty) page ends the feed with `checkpoint: null`.
-      const isLast = page >= pages.length - 1 || documents.length === 0
-      return {
-        documents,
-        checkpoint: isLast || last === undefined ? null : last.checkpoint
+      let pageIndex = 0
+      if (args.checkpoint !== undefined) {
+        const resumed = pageAfter.get(args.checkpoint)
+        if (resumed === undefined) {
+          throw new Error(`fake feed never issued "${args.checkpoint}"`)
+        }
+        pageIndex = resumed
       }
+      const documents = pages[pageIndex] ?? []
+      const last = documents[documents.length - 1]
+      if (pageIndex >= pages.length - 1) {
+        return { documents, checkpoint: options.tailCheckpoint ?? null }
+      }
+      // A non-final empty page ends the feed with `checkpoint: null` too.
+      return { documents, checkpoint: last?.checkpoint ?? null }
     },
     async putContent() {
       return { version: 0 } // unused here; get() is what this suite exercises
@@ -96,13 +125,66 @@ describe('withFeedPrimaryRead get', () => {
 
     const primary = await port.get({ id: 'r1' })
 
-    expect(primary).toEqual({
+    expect(primary).toStrictEqual({
       version: 7,
       updatedAt: '2026-01-01T00:00:00Z',
       deleted: false,
       data: { a: 1 },
       metaVersion: 2
     })
+    // The feed doc declared no writer label, so the key is absent outright.
+    expect('writerId' in primary!).toBe(false)
+  })
+
+  it('follows the checkpoint chain to a resource on a later page', async () => {
+    const base = fakeBasePort({
+      pages: [
+        [wire({ id: 'a' }), wire({ id: 'b' })],
+        [wire({ id: 'c' }), wire({ id: 'd' })],
+        [wire({ id: 'r1', version: 7 }), wire({ id: 'e' })]
+      ]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'r1' })).toMatchObject({ version: 7 })
+    // Each page resumes from the checkpoint the previous page reported; the
+    // first page sends none at all.
+    expect(base.queries).toStrictEqual([
+      { limit: 500 },
+      { checkpoint: 'cp-b', limit: 500 },
+      { checkpoint: 'cp-d', limit: 500 }
+    ])
+  })
+
+  it('walks every page before reporting a multi-page feed absence', async () => {
+    const base = fakeBasePort({
+      pages: [[wire({ id: 'a' })], [wire({ id: 'b' })], [wire({ id: 'c' })]]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'missing' })).toBeNull()
+    expect(base.queries.map(query => query.checkpoint)).toStrictEqual([
+      undefined,
+      'cp-a',
+      'cp-b'
+    ])
+  })
+
+  it('stops at an empty page even when it carries a resume checkpoint', async () => {
+    // The feed's end shows as an empty page whose checkpoint is still
+    // non-null. The walk must stop on the empty page alone; resuming from
+    // `cp-tail` would ask the fake for a position it never issued.
+    const base = fakeBasePort({
+      pages: [[wire({ id: 'a' }), wire({ id: 'b' })], []],
+      tailCheckpoint: 'cp-tail'
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'missing' })).toBeNull()
+    expect(base.queries).toStrictEqual([
+      { limit: 500 },
+      { checkpoint: 'cp-b', limit: 500 }
+    ])
   })
 
   it('carries the key epoch stamp into the primary state', async () => {
@@ -207,6 +289,24 @@ describe('withFeedPrimaryRead get with a batch cache', () => {
     // `r2` was paged past on the way to `r1`, so it is answered from the memo.
     expect(await port.get({ id: 'r2', cache })).toMatchObject({ version: 9 })
     expect(base.queryCalls).toBe(1)
+  })
+
+  it('memoizes the documents of every page a multi-page walk passes', async () => {
+    const base = fakeBasePort({
+      pages: [
+        [wire({ id: 'r2', version: 9 })],
+        [wire({ id: 'r3', version: 11 })],
+        [wire({ id: 'r1', version: 7 })]
+      ]
+    })
+    const port = withFeedPrimaryRead(base)
+    const cache = emptyCache()
+
+    expect(await port.get({ id: 'r1', cache })).toMatchObject({ version: 7 })
+    expect(base.queryCalls).toBe(3)
+    expect(await port.get({ id: 'r2', cache })).toMatchObject({ version: 9 })
+    expect(await port.get({ id: 'r3', cache })).toMatchObject({ version: 11 })
+    expect(base.queryCalls).toBe(3)
   })
 
   it('runs one walk, not one per row, for concurrent reads', async () => {

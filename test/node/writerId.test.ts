@@ -99,10 +99,14 @@ describe('clearPersistedWriterId', () => {
     const storage = memoryStorage()
     const app = getWriterId({ storageKeyPrefix: 'myapp:', storage })
     const wallet = getWriterId({ storageKeyPrefix: 'freewallet:', storage })
+    expect(storage.entries.get('myapp:writerId')).toBe(app)
     clearPersistedWriterId({ storageKeyPrefix: 'myapp:', storage })
     expect(storage.entries.has('myapp:writerId')).toBe(false)
     expect(storage.entries.get('freewallet:writerId')).toBe(wallet)
-    expect(app).not.toBe(wallet)
+    // The surviving prefix still answers with its original id, not a re-mint.
+    expect(getWriterId({ storageKeyPrefix: 'freewallet:', storage })).toBe(
+      wallet
+    )
   })
 
   it('swallows a storage that throws', () => {

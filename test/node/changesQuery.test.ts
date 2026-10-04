@@ -8,7 +8,13 @@
 import { describe, it, expect, vi } from 'vitest'
 import { WasSyncCheckpointError } from '@interop/was-client/sync'
 import { createPullHandler, wireDocToRxDoc } from '../../src/changesQuery.js'
-import type { SyncCheckpoint, WasSyncPort, WireDoc } from '../../src/types.js'
+import type {
+  SyncCheckpoint,
+  SyncedDoc,
+  WasSyncPort,
+  WireDoc,
+  WithDeleted
+} from '../../src/types.js'
 
 /**
  * A minimal fake port whose `query` replays a scripted list of pages. Only the
@@ -228,9 +234,31 @@ describe('wireDocToRxDoc', () => {
       checkpoint: 'cp',
       version: 3
     }
-    for (const doc of [live, tombstone]) {
+    const cases: Array<[WireDoc, WithDeleted<SyncedDoc>]> = [
+      [
+        live,
+        {
+          id: 'abc',
+          _deleted: false,
+          updatedAt: '2026-01-01T00:00:00Z',
+          version: 2,
+          etag: '"e2"',
+          data: { hello: 'world' }
+        }
+      ],
+      [
+        tombstone,
+        {
+          id: 'gone',
+          _deleted: true,
+          updatedAt: '2026-01-02T00:00:00Z',
+          version: 3
+        }
+      ]
+    ]
+    for (const [doc, expected] of cases) {
       const stamped = wireDocToRxDoc({ ...doc, writerId: 'writer-a' })
-      expect(stamped).toEqual(wireDocToRxDoc(doc))
+      expect(stamped).toStrictEqual(expected)
       expect('writerId' in stamped).toBe(false)
     }
   })

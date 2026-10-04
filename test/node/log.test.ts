@@ -44,6 +44,22 @@ describe('the console fallback', () => {
 
     expect(debug).toHaveBeenCalledWith('[was-sync]', 'x')
   })
+
+  it('routes info to console.info', () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+
+    log.info('x', { a: 1 })
+
+    expect(info).toHaveBeenCalledExactlyOnceWith('[was-sync]', 'x', { a: 1 })
+  })
+
+  it('routes error to console.error', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    log.error('x', { a: 1 })
+
+    expect(error).toHaveBeenCalledExactlyOnceWith('[was-sync]', 'x', { a: 1 })
+  })
 })
 
 describe('setLogger', () => {
@@ -75,5 +91,18 @@ describe('setLogger', () => {
 
     const restored = setLogger(previous)
     expect(restored).toBe(capture.logger)
+  })
+
+  it('routes info to the installed logger at the info level', () => {
+    const capture = captureLogger('sync')
+    setLogger(capture.logger)
+
+    log.info('msg', { id: 'r1' })
+
+    expect(capture.events).toHaveLength(1)
+    const event = capture.events[0]!
+    expect(event.level).toBe('info')
+    expect(event.msg).toBe('msg')
+    expect(event.data).toEqual({ id: 'r1' })
   })
 })

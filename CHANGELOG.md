@@ -32,6 +32,19 @@
 
 - Tests: the integration suite boots through `was-teaching-server/testing`
   (`startTestServer`, `openTempBackend`), against the server's 0.40.0 release.
+- Tests: an audit of the suites for tautological and inert tests. The `hasAck()`
+  memo bypass, the feed walk's page-to-page checkpoint forwarding, teardown
+  awaiting `cancel()`, registration before subscription, and the controller's
+  sync-port wiring (`feedPrimaryRead`, `capability`, `mapAuthErrors`) now have
+  tests that fail when the behavior breaks. The packaging and browser smoke
+  tests make `rxdb` unresolvable before loading the root entry, so their "no
+  rxdb" claim is checked rather than named. Duplicate cases were collapsed;
+  `toEqual` on absent-member claims became `toStrictEqual` or `in` checks.
+- `./testing`: `memorySchedule()` gains `intervalsMs()` and
+  `memoryOnlineSource()` gains `subscribers()`, so a test can pin the poll
+  interval and the online-source unsubscribe.
+- The Playwright smoke server runs on its own port (5791, strict), so a stray
+  dev server on 5173 is no longer picked up.
 
 ## 0.7.0 - 2026-10-01
 

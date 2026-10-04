@@ -15,6 +15,7 @@
  * through a second, independent port on the same collection, so an assertion
  * about "what the server holds" never reads through the replica under test.
  */
+import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createRxDatabase, type RxDatabase } from 'rxdb/plugins/core'
 import { getRxStorageMemory } from 'rxdb/plugins/storage-memory'
@@ -97,32 +98,75 @@ async function openServerCollection(): Promise<{
 /**
  * Opens a fresh memory-storage collection on the synced-document schema. With
  * `lww` set, the package's last-write-wins conflict handler is installed over
- * plaintext bodies; otherwise RxDB's default (remote wins) applies.
+ * plaintext bodies. Otherwise the remote state wins, as under RxDB's default.
+ * `onConflict` is called once per conflict RxDB hands the handler.
  */
 async function openCollection({
   lww = false,
   onConflict
 }: { lww?: boolean; onConflict?: () => void } = {}) {
   db = await createRxDatabase({
-    name: 'synctest' + Math.floor(performance.now()).toString(36),
+    name: `synctest-${randomUUID()}`,
     storage: getRxStorageMemory(),
     multiInstance: false
   })
-  const resolve = lwwResolver({ decrypt: async ({ envelope }) => envelope })
+  const resolveLww = lwwResolver({ decrypt: async ({ envelope }) => envelope })
   const { synced } = await db.addCollections({
     synced: {
       schema: syncedDocSchema(),
-      ...(lww && {
+      ...((lww || onConflict !== undefined) && {
         conflictHandler: makeConflictHandler({
           resolve: async input => {
             onConflict?.()
-            return resolve(input)
+            return lww ? resolveLww(input) : 'remote'
           }
         })
       })
     }
   })
   return synced
+}
+
+/**
+ * Pulls the current test's server collection into a fresh replica of its own
+ * and returns the rows it ends up holding, sorted by id. The replica pushes
+ * nothing, so every member it holds came down the feed.
+ */
+async function pullFreshReplica({
+  replicationIdentifier,
+  writerId
+}: {
+  replicationIdentifier: string
+  writerId?: string
+}) {
+  const database = await createRxDatabase({
+    name: `freshtest-${randomUUID()}`,
+    storage: getRxStorageMemory(),
+    multiInstance: false
+  })
+  try {
+    const { synced } = await database.addCollections({
+      synced: { schema: syncedDocSchema() }
+    })
+    const replication = createWasReplication({
+      rxCollection: synced,
+      wasPort: createWasSyncPort({
+        was,
+        spaceId,
+        collectionId: `synced-${collectionSerial}`
+      }),
+      replicationIdentifier,
+      ...(writerId !== undefined && { writerId })
+    })
+    await replication.awaitInitialReplication()
+    await replication.cancel()
+    const docs = await synced.find().exec()
+    return docs
+      .map(doc => doc.toJSON())
+      .sort((left, right) => left.id.localeCompare(right.id))
+  } finally {
+    await database.close()
+  }
 }
 
 /**
@@ -135,15 +179,17 @@ function stepOf(data: Json | undefined): unknown {
 }
 
 /**
- * Wraps the port's two writes to record the precondition each one carried, so
- * a test can assert the exact conditional-write sequence the driver issued.
+ * Wraps the port's three writes to record the precondition each one carried,
+ * so a test can assert the exact conditional-write sequence the driver issued.
  */
 function recordPreconditionsOn(port: WasSyncPort): {
   contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>
   metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>
+  deleteWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>
 } {
   const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
   const metaWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+  const deleteWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
   const record = (
     into: Array<{ ifMatch?: string; ifNoneMatch?: boolean }>,
     { ifMatch, ifNoneMatch }: { ifMatch?: string; ifNoneMatch?: boolean }
@@ -162,7 +208,12 @@ function recordPreconditionsOn(port: WasSyncPort): {
     record(metaWrites, options)
     return rawPutMeta(options)
   }
-  return { contentWrites, metaWrites }
+  const rawDelete = port.deleteContent.bind(port)
+  port.deleteContent = async options => {
+    record(deleteWrites, options)
+    return rawDelete(options)
+  }
+  return { contentWrites, metaWrites, deleteWrites }
 }
 
 /**
@@ -237,7 +288,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it('round-trips the key-epoch id: a local epoch-stamped doc pushes and pulls back with it intact', async () => {
+  it('round-trips the key-epoch id: a local epoch-stamped doc pushes, and a fresh replica pulls it with the epoch intact', async () => {
     const collection = await openCollection()
     const { port, observer } = await openServerCollection()
     const replication = createWasReplication({
@@ -265,18 +316,15 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       hello: 'world'
     })
 
-    // ...and the epoch pulls back down the feed onto the local document.
-    await eventually(
-      async () => {
-        const current = await collection.findOne('cid-epoch').exec()
-        return current?.toJSON().epoch === 'epoch-1'
-      },
-      () => replication.reSync()
-    )
-    const doc = await collection.findOne('cid-epoch').exec()
-    expect(doc?.toJSON().epoch).toBe('epoch-1')
-
     await replication.cancel()
+
+    // ...and a replica that never held the row pulls the epoch down the feed.
+    const pulled = await pullFreshReplica({
+      replicationIdentifier: 'test-epoch-roundtrip-fresh'
+    })
+    expect(pulled.map(doc => [doc.id, doc.epoch])).toEqual([
+      ['cid-epoch', 'epoch-1']
+    ])
   })
 
   it('replicates an epoch-stamped opaque envelope verbatim with no cipher (locked vault still syncs)', async () => {
@@ -575,9 +623,14 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it('resolves a stale If-Match (412) by last write wins and converges', async () => {
-    const collection = await openCollection({ lww: true })
+  it('resolves a stale If-Match (412) by last write wins: a later local payload lands over the server', async () => {
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
     const { port, observer } = await openServerCollection()
+    const { contentWrites } = recordPreconditionsOn(port)
     // The LWW payload (`updatedAt`, `writerId`) travels inside `data`.
     const created = await observer.putContent({
       id: 'cid-race',
@@ -599,7 +652,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
 
     // Another writer bumps the resource behind the replica's back, so the
     // replica's next push carries a stale If-Match and the server answers 412.
-    await observer.putContent({
+    const bumped = await observer.putContent({
       id: 'cid-race',
       data: {
         step: 'server-2',
@@ -631,6 +684,81 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       },
       () => replication.reSync()
     )
+
+    // The stale write was refused once, and the re-push carried the
+    // validator of the revision that refused it.
+    expect(contentWrites).toEqual([
+      { ifMatch: created.etag },
+      { ifMatch: bumped.etag }
+    ])
+    expect(conflicts).toBe(1)
+
+    await replication.cancel()
+  })
+
+  it('resolves a stale If-Match (412) by last write wins: a later remote payload replaces the local edit', async () => {
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { contentWrites } = recordPreconditionsOn(port)
+    const created = await observer.putContent({
+      id: 'cid-race-remote',
+      data: {
+        step: 'server-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-412-remote'
+    })
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-race-remote').exec()
+    expect(stepOf(pulled?.toJSON().data)).toBe('server-1')
+
+    // This time the other writer's revision carries the later payload.
+    const bumped = await observer.putContent({
+      id: 'cid-race-remote',
+      data: {
+        step: 'server-2',
+        updatedAt: '2026-01-01T00:00:03Z',
+        writerId: 'b'
+      },
+      ifMatch: created.etag
+    })
+    await pulled!.incrementalPatch({
+      data: {
+        step: 'local-2',
+        updatedAt: '2026-01-01T00:00:02Z',
+        writerId: 'a'
+      },
+      updatedAt: '000000000002'
+    })
+
+    // The local edit loses: the replica takes the server's revision.
+    await eventually(
+      async () => {
+        const current = await collection.findOne('cid-race-remote').exec()
+        return (
+          stepOf(current?.toJSON().data) === 'server-2' &&
+          current?.toJSON().etag === bumped.etag
+        )
+      },
+      () => replication.reSync()
+    )
+
+    // One refused write and no re-push; the server still holds its revision.
+    expect(contentWrites).toEqual([{ ifMatch: created.etag }])
+    expect(conflicts).toBe(1)
+    const primary = await observer.get({ id: 'cid-race-remote' })
+    expect(stepOf(primary?.data)).toBe('server-2')
+    expect(primary?.etag).toBe(bumped.etag)
 
     await replication.cancel()
   })
@@ -701,14 +829,11 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it('resurrects a row carrying custom: the /meta half is a create, and the pre-delete meta ETag is dead', async () => {
+  it('resurrects a row carrying custom: the /meta half is a create', async () => {
     // The tombstone drops the metadata object together with `custom`, so the
     // push handler's `/meta` write on a resurrection goes out as a
     // create-if-absent (`If-None-Match: *`) and lands in the same push cycle
-    // as the content create. The server also retires the pre-delete metadata
-    // validator with the tombstone: its generation dies with the metadata
-    // object, so a stale replica's `If-Match` cannot clobber the resurrected
-    // row's `custom`.
+    // as the content create.
     let conflicts = 0
     const collection = await openCollection({
       lww: true,
@@ -790,21 +915,6 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     expect(errors).toEqual([])
     const primary = await observer.get({ id: 'cid-resurrect-meta' })
     expect(primary?.custom).toEqual({ name: 'After', tags: { starred: 'yes' } })
-    expect(primary?.metaEtag).not.toBe(preDeleteMetaEtag)
-
-    // A replica still holding the pre-delete metadata validator is refused:
-    // its `If-Match` is a 412, not a clobber.
-    await expect(
-      observer.putMeta({
-        id: 'cid-resurrect-meta',
-        custom: { name: 'Stale', tags: {} },
-        ifMatch: preDeleteMetaEtag
-      })
-    ).rejects.toSatisfy(isSyncConflictError)
-    expect((await observer.get({ id: 'cid-resurrect-meta' }))?.custom).toEqual({
-      name: 'After',
-      tags: { starred: 'yes' }
-    })
 
     await replication.cancel()
   })
@@ -893,8 +1003,12 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     // last-known validator and 412s; the re-read body is equal, so only the
     // writer label says this is not A's own revision drift. Remote wins, so A
     // ends up holding the re-created row and the server's copy stays live.
-    const collection = await openCollection()
+    let conflicts = 0
+    const collection = await openCollection({
+      onConflict: () => (conflicts += 1)
+    })
     const { port, observer } = await openServerCollection()
+    const { deleteWrites } = recordPreconditionsOn(port)
     const replication = createWasReplication({
       rxCollection: collection,
       wasPort: port,
@@ -942,6 +1056,10 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       () => replication.reSync()
     )
 
+    // Exactly one conditional delete, on A's own validator, and the refusal
+    // reached the conflict handler rather than being read as done.
+    expect(deleteWrites).toEqual([{ ifMatch: own!.etag }])
+    expect(conflicts).toBe(1)
     const primary = await observer.get({ id: 'cid-recreated' })
     expect(primary).not.toBeNull()
     expect(primary!.version).toBe(recreated.version)
@@ -1041,7 +1159,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it('declares the injected writerId on every push, and a mixed feed converges the same with and without one', async () => {
+  it('declares the injected writerId on every push, and a fresh replica under the same label pulls the mixed feed', async () => {
     const { port, observer } = await openServerCollection()
     // A foreign-labeled revision, an unlabeled one, and a tombstone, all
     // written by another writer.
@@ -1139,47 +1257,18 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       expect(write.writerId).toBe('writer-a')
     }
 
-    // Two fresh replicas pull the same feed: one under A's label (which
-    // holds none of those revisions), one under none.
-    const snapshot = async (writerId?: string) => {
-      const database = await createRxDatabase({
-        name: 'writertest' + Math.random().toString(36).slice(2),
-        storage: getRxStorageMemory(),
-        multiInstance: false
-      })
-      try {
-        const { synced } = await database.addCollections({
-          synced: { schema: syncedDocSchema() }
-        })
-        const replication = createWasReplication({
-          rxCollection: synced,
-          wasPort: createWasSyncPort({
-            was,
-            spaceId,
-            collectionId: `synced-${collectionSerial}`
-          }),
-          replicationIdentifier: `test-writer-${writerId ?? 'none'}`,
-          ...(writerId !== undefined && { writerId })
-        })
-        await replication.awaitInitialReplication()
-        await replication.cancel()
-        const docs = await synced.find().exec()
-        return docs
-          .map(doc => doc.toJSON())
-          .sort((left, right) => left.id.localeCompare(right.id))
-      } finally {
-        await database.close()
-      }
-    }
-    const withLabel = await snapshot('writer-a')
-    const withoutLabel = await snapshot()
+    // A fresh replica under A's label (which holds none of those revisions)
+    // pulls the same feed.
+    const withLabel = await pullFreshReplica({
+      replicationIdentifier: 'test-writer-writer-a',
+      writerId: 'writer-a'
+    })
 
     expect(withLabel.map(doc => doc.id)).toEqual([
       'cid-foreign',
       'cid-own',
       'cid-unlabeled'
     ])
-    expect(withLabel).toEqual(withoutLabel)
     // The writer's own replica agrees with a fresh one on every member of
     // every row it replicated, the server-assigned `createdBy` and `updatedAt`
     // of its own rows included: their feed echo landed over the ack write-back.

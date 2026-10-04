@@ -18,30 +18,70 @@
  * imports and collecting the bare specifiers, so it holds however the modules
  * are arranged behind the entry.
  */
+import { execFileSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), '../../dist')
 
 /**
- * Every specifier a file imports or re-exports, relative and bare alike.
+ * Every specifier a file imports or re-exports, relative and bare alike, plus
+ * every package a `/// <reference types="..." />` directive names.
  *
  * @param source {string}
  * @returns {string[]}
  */
 function specifiersOf(source: string): string[] {
   const found: string[] = []
-  const pattern = /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]/g
+  const pattern =
+    /(?:from|import)\s*\(?\s*['"]([^'"]+)['"]|\/\/\/\s*<reference\s+types\s*=\s*['"]([^'"]+)['"]/g
   let match = pattern.exec(source)
   while (match !== null) {
-    if (match[1] !== undefined) {
-      found.push(match[1])
+    const specifier = match[1] ?? match[2]
+    if (specifier !== undefined) {
+      found.push(specifier)
     }
     match = pattern.exec(source)
   }
   return found
+}
+
+/**
+ * Imports one emitted entry in a child `node` process whose module resolver
+ * refuses `rxdb` and every `rxdb/*` subpath, as if the package were not
+ * installed, and returns what the child printed: the synced-document schema
+ * version when the entry loads, or the error message when it does not.
+ *
+ * @param entry {string}   a file name under `dist`
+ * @returns {string}
+ */
+function importWithRxdbUnresolvable(entry: string): string {
+  const script = `
+    import { registerHooks } from 'node:module'
+    registerHooks({
+      resolve(specifier, context, nextResolve) {
+        if (/^rxdb(\\/|$)/.test(specifier)) {
+          const err = new Error('rxdb is not installed: ' + specifier)
+          err.code = 'ERR_MODULE_NOT_FOUND'
+          throw err
+        }
+        return nextResolve(specifier, context)
+      }
+    })
+    try {
+      const entry = await import(${JSON.stringify(pathToFileURL(resolve(DIST, entry)).href)})
+      console.log(String(entry.syncedDocSchema().version))
+    } catch (err) {
+      console.log(err.message)
+    }
+  `
+  return execFileSync(
+    process.execPath,
+    ['--input-type=module', '--eval', script],
+    { encoding: 'utf8' }
+  ).trim()
 }
 
 /**
@@ -97,10 +137,8 @@ describe('the root entry is free of rxdb', () => {
     expect([...bare].filter(name => name.startsWith('rxdb'))).toEqual([])
   })
 
-  it('loads with no rxdb resolvable', async () => {
-    const root = await import('../../dist/index.js')
-    expect(typeof root.syncedDocSchema).toBe('function')
-    expect(root.syncedDocSchema().version).toBe(0)
+  it('loads with no rxdb resolvable', () => {
+    expect(importWithRxdbUnresolvable('index.js')).toBe('0')
   })
 })
 
@@ -112,6 +150,12 @@ describe('the rxdb entry carries the peer', () => {
     ])
   })
 
+  it('fails to load with no rxdb resolvable, so the root check is not vacuous', () => {
+    expect(importWithRxdbUnresolvable('rxdb.js')).toBe(
+      'rxdb is not installed: rxdb/plugins/replication'
+    )
+  })
+
   it('declares rxdb types', async () => {
     const bare = await bareSpecifiersFrom('rxdb.d.ts')
     expect(
@@ -121,7 +165,7 @@ describe('the rxdb entry carries the peer', () => {
 })
 
 describe('the testing entry', () => {
-  it('needs no rxdb either, so a consumer fake costs no replica', async () => {
+  it('needs no rxdb in its runtime graph, so a consumer fake costs no replica', async () => {
     const bare = await bareSpecifiersFrom('testing.js')
     expect([...bare].filter(name => name.startsWith('rxdb'))).toEqual([])
   })

@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { SMOKE_PORT } from './vite.config.js'
 
 export default defineConfig({
   testDir: './test/browser',
@@ -8,7 +9,7 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: `http://localhost:${SMOKE_PORT}`,
     trace: 'on-first-retry'
   },
   projects: [
@@ -19,7 +20,8 @@ export default defineConfig({
   ],
   webServer: {
     command: 'pnpm run dev',
-    url: 'http://localhost:5173/test/index.html',
+    url: `http://localhost:${SMOKE_PORT}/test/index.html`,
+    env: { WAS_SYNC_BROWSER_SMOKE: '1' },
     reuseExistingServer: !process.env.CI
   }
 })

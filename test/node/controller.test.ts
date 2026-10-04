@@ -7,7 +7,9 @@
  * registration before subscription, the both-keys status callback, the
  * uncovered-collection skip, the auth escalation, the remote-change
  * subscription, the no-op reSync on a stopping instance, the default
- * replication identifier, and the stop that resolves after every cancel.
+ * replication identifier, the sync port each replication is handed, the poll
+ * rate and online unsubscription, and the stop that resolves after every
+ * cancel.
  *
  * `createWasReplication` is mocked, so no RxDB database is opened here: the
  * subject is the lifecycle around the replication states, not the states
@@ -16,9 +18,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { captureLogger } from '@interop/logger'
 import type { WasClient } from '@interop/was-client'
-import { WasSyncAuthError } from '@interop/was-client/sync'
+import { isSyncAuthError, WasSyncAuthError } from '@interop/was-client/sync'
 import { memoryOnlineSource, memorySchedule } from '../../src/testing.js'
 import { setLogger } from '../../src/log.js'
+import type { WasSyncPort } from '../../src/types.js'
 
 const createWasReplication = vi.fn()
 
@@ -59,7 +62,9 @@ function stream<Value>(): {
 
 /**
  * A stand-in for one `RxReplicationState`, with its two observed streams, a
- * `cancel` that records its call order, and a `reSync` spy.
+ * `cancel` that records its call order, and a `reSync` spy. The cancel records
+ * only after a macrotask deferral, the way RxDB's own `cancel()` awaits its
+ * queues, so a caller that does not await it finishes before the record lands.
  */
 function fakeReplication(cancelOrder: string[], name: string) {
   return {
@@ -68,9 +73,85 @@ function fakeReplication(cancelOrder: string[], name: string) {
     error$: stream<unknown>(),
     reSync: vi.fn(),
     cancel: vi.fn(async () => {
+      await new Promise(resolve => setTimeout(resolve, 0))
       cancelOrder.push(name)
     })
   }
+}
+
+/**
+ * A fake replication whose `active$` throws on subscribe, standing in for a
+ * failure after construction and registration but before the subscriptions.
+ */
+function throwingSubscribeReplication(cancelOrder: string[], name: string) {
+  const replication = fakeReplication(cancelOrder, name)
+  return {
+    ...replication,
+    active$: {
+      ...replication.active$,
+      subscribe(): never {
+        throw new Error('subscribe failed')
+      }
+    }
+  }
+}
+
+/**
+ * A WAS client that records what each sync-port call hands it: the capability
+ * on the collection handle the feed reads through, the feed reads themselves,
+ * and every direct request. Every request rejects with a `403`, so a test can
+ * read back which signal the port mapped it to.
+ */
+function recordingWasClient(): {
+  client: WasClient
+  collectionCapabilities: unknown[]
+  changesCalls: () => number
+  requests: Array<{ capability?: unknown; method: string; path: string }>
+} {
+  const collectionCapabilities: unknown[] = []
+  const requests: Array<{
+    capability?: unknown
+    method: string
+    path: string
+  }> = []
+  let changesCalls = 0
+  const client = {
+    space: () => ({
+      collection: (_id: string, options: { capability?: unknown }) => {
+        collectionCapabilities.push(options.capability)
+        return {
+          changes: async () => {
+            changesCalls++
+            return { documents: [], checkpoint: null }
+          }
+        }
+      }
+    }),
+    request: async (request: {
+      capability?: unknown
+      method: string
+      path: string
+    }) => {
+      requests.push(request)
+      throw Object.assign(new Error('forbidden'), { status: 403 })
+    }
+  } as unknown as WasClient
+  return {
+    client,
+    collectionCapabilities,
+    changesCalls: () => changesCalls,
+    requests
+  }
+}
+
+/**
+ * The `wasPort` the controller handed the Nth `createWasReplication` call.
+ */
+function handedPort(callIndex = 0): WasSyncPort {
+  const options = createWasReplication.mock.calls[callIndex]?.[0] as {
+    wasPort: WasSyncPort
+  }
+  return options.wasPort
 }
 
 /**
@@ -185,8 +266,12 @@ describe('createSyncController lifecycle', () => {
     await controller.start()
 
     // Replicating the uncovered collection under no capability would draw a
-    // fail-closed 403 and read as a session-wide access failure.
-    expect(statuses).toContainEqual(['posts', 'error'])
+    // fail-closed 403 and read as a session-wide access failure. The skipped
+    // collection never passes through `idle` on its way to `error`.
+    expect(statuses).toEqual([
+      ['notes', 'idle'],
+      ['posts', 'error']
+    ])
     expect(createWasReplication).toHaveBeenCalledTimes(1)
     expect(rxCollection).toHaveBeenCalledExactlyOnceWith('notes')
     expect(logged('warn')).toHaveLength(1)
@@ -336,7 +421,7 @@ describe('createSyncController failed bring-up', () => {
     expect(createWasReplication).toHaveBeenCalledTimes(2)
   })
 
-  it('cancels the replications it already registered', async () => {
+  it('cancels the replications it already registered when a later construction throws', async () => {
     const cancelOrder: string[] = []
     const first = fakeReplication(cancelOrder, 'notes')
     createWasReplication
@@ -359,12 +444,37 @@ describe('createSyncController failed bring-up', () => {
       pollMs: 0
     })
 
-    // The registration happens before the subscriptions, so a throw anywhere
-    // after construction still leaves a replication the unwind can cancel.
     await expect(controller.start()).rejects.toThrow('database closed')
     expect(first.cancel).toHaveBeenCalledOnce()
     expect(first.active$.live()).toBe(0)
     expect(first.error$.live()).toBe(0)
+  })
+
+  it('cancels a replication whose own subscription throws', async () => {
+    const cancelOrder: string[] = []
+    const first = throwingSubscribeReplication(cancelOrder, 'notes')
+    createWasReplication.mockReturnValueOnce(first)
+    const controller = createSyncController({
+      port: {
+        wasClient,
+        spaceId: 'space-1',
+        serverUrl: 'https://was.example',
+        collections: [
+          { key: 'notes', id: 'notes' },
+          { key: 'posts', id: 'posts' }
+        ],
+        rxCollection: (() => fakeRxCollection()) as never
+      },
+      onStatus: () => {},
+      pollMs: 0
+    })
+
+    // The registration happens before the subscriptions, so a throw from
+    // subscribing still leaves a replication the unwind can cancel.
+    await expect(controller.start()).rejects.toThrow('subscribe failed')
+    expect(createWasReplication).toHaveBeenCalledOnce()
+    expect(first.cancel).toHaveBeenCalledOnce()
+    expect(cancelOrder).toEqual(['notes'])
   })
 })
 
@@ -462,8 +572,108 @@ describe('createSyncController remote change', () => {
   })
 })
 
+describe('createSyncController sync port', () => {
+  function build(
+    client: WasClient,
+    options: {
+      capability?: unknown
+      feedPrimaryRead?: boolean
+      mapAuthErrors?: boolean
+    } = {}
+  ) {
+    createWasReplication.mockImplementation(() => fakeReplication([], 'notes'))
+    return createSyncController({
+      port: {
+        wasClient: client,
+        spaceId: 'space-1',
+        serverUrl: 'https://was.example',
+        collections: [
+          {
+            key: 'notes',
+            id: 'notes',
+            ...(options.capability !== undefined && {
+              capability: options.capability as never
+            })
+          }
+        ],
+        rxCollection: (() => fakeRxCollection()) as never,
+        ...(options.feedPrimaryRead !== undefined && {
+          feedPrimaryRead: options.feedPrimaryRead
+        }),
+        ...(options.mapAuthErrors !== undefined && {
+          mapAuthErrors: options.mapAuthErrors
+        })
+      },
+      onStatus: () => {},
+      pollMs: 0
+    })
+  }
+
+  it('resolves the conflict re-read from the changes feed under feedPrimaryRead', async () => {
+    const was = recordingWasClient()
+    const controller = build(was.client, { feedPrimaryRead: true })
+    await controller.start()
+
+    // The feed-read wrapper answers `get` by walking the feed, never by a
+    // direct GET whose ETag header CORS may hide.
+    expect(await handedPort().get({ id: 'r1' })).toBeNull()
+    expect(was.changesCalls()).toBe(1)
+    expect(was.requests).toEqual([])
+    await controller.stop()
+  })
+
+  it('hands the base port through when feedPrimaryRead is off', async () => {
+    const was = recordingWasClient()
+    const controller = build(was.client, { feedPrimaryRead: false })
+    await controller.start()
+
+    // The base port's own `get` issues direct GETs and never reads the feed.
+    await expect(handedPort().get({ id: 'r1' })).rejects.toThrow()
+    expect(was.changesCalls()).toBe(0)
+    expect(was.requests.map(request => request.method)).toContain('GET')
+    await controller.stop()
+  })
+
+  it('invokes the collection capability on every request the port makes', async () => {
+    const was = recordingWasClient()
+    const capability = { id: 'urn:zcap:notes' }
+    const controller = build(was.client, { capability })
+    await controller.start()
+
+    await expect(
+      handedPort().putContent({ id: 'r1', data: { a: 1 } })
+    ).rejects.toThrow()
+    expect(was.collectionCapabilities).toEqual([capability])
+    expect(was.requests).toHaveLength(1)
+    expect(was.requests[0]!.capability).toBe(capability)
+    await controller.stop()
+  })
+
+  it('asks the port for typed auth signals under mapAuthErrors, and not without it', async () => {
+    const mapped = recordingWasClient()
+    const mapping = build(mapped.client, { mapAuthErrors: true })
+    await mapping.start()
+    const mappedErr = await handedPort(0)
+      .putContent({ id: 'r1', data: { a: 1 } })
+      .catch((err: unknown) => err)
+    await mapping.stop()
+
+    const unmapped = recordingWasClient()
+    const plain = build(unmapped.client)
+    await plain.start()
+    const plainErr = await handedPort(1)
+      .putContent({ id: 'r1', data: { a: 1 } })
+      .catch((err: unknown) => err)
+    await plain.stop()
+
+    // The same 403 reaches `onAuthError` only through the mapped signal.
+    expect(isSyncAuthError(mappedErr)).toBe(true)
+    expect(isSyncAuthError(plainErr)).toBe(false)
+  })
+})
+
 describe('createSyncController polling and reachability', () => {
-  it('polls through the injected schedule and skips a tick while offline', async () => {
+  it('polls at pollMs through the injected schedule, skips a tick while offline, and unsubscribes on stop', async () => {
     const cancelOrder: string[] = []
     const replication = fakeReplication(cancelOrder, 'notes')
     createWasReplication.mockReturnValue(replication)
@@ -483,6 +693,8 @@ describe('createSyncController polling and reachability', () => {
       pollMs: 30_000
     })
     await controller.start()
+    expect(schedule.intervalsMs()).toEqual([30_000])
+    expect(online.subscribers()).toBe(1)
 
     schedule.tick()
     expect(replication.reSync).toHaveBeenCalledTimes(1)
@@ -497,7 +709,10 @@ describe('createSyncController polling and reachability', () => {
 
     await controller.stop()
     expect(schedule.pending()).toBe(0)
+    // Unsubscribed outright, not merely muted by the stopped latch in reSync.
+    expect(online.subscribers()).toBe(0)
     schedule.tick()
+    online.goOnline()
     expect(replication.reSync).toHaveBeenCalledTimes(2)
   })
 
@@ -544,12 +759,18 @@ describe('createSyncController stop', () => {
       pollMs: 0
     })
     await controller.start()
-    await controller.stop()
+    // Snapshot the record at the moment stop resolves: each fake cancel records
+    // only after a macrotask, so a stop that did not await its cancels would
+    // resolve while the record is still empty.
+    let cancelledAtResolve: string[] = []
+    await controller.stop().then(() => {
+      cancelledAtResolve = [...cancelOrder]
+    })
 
     // The weaker true property: `cancel()` awaits RxDB's start and checkpoint
     // queues, not an in-flight round trip, so a handler whose response lands
     // after this can still write once.
-    expect(cancelOrder).toEqual(['notes', 'posts'])
+    expect(cancelledAtResolve).toEqual(['notes', 'posts'])
     expect(notes.active$.live()).toBe(0)
     expect(posts.error$.live()).toBe(0)
   })

@@ -65,7 +65,7 @@ describe('bodiesEqual', () => {
 })
 
 describe('copyOptionalBodyFields', () => {
-  it('carries every present optional field, including createdBy', () => {
+  it('carries every present optional field', () => {
     const target: OptionalBodyFields = {}
     copyOptionalBodyFields({
       source: {
@@ -73,23 +73,36 @@ describe('copyOptionalBodyFields', () => {
         custom: { b: 2 },
         metaVersion: 3,
         epoch: 'epoch-1',
-        createdBy: 'did:key:z6MkCreator'
+        createdBy: 'did:key:z6MkCreator',
+        etag: '"etag-7"',
+        metaEtag: '"etag-3"'
       },
       target
     })
-    expect(target).toEqual({
+    expect(target).toStrictEqual({
       data: { a: 1 },
       custom: { b: 2 },
       metaVersion: 3,
       epoch: 'epoch-1',
-      createdBy: 'did:key:z6MkCreator'
+      createdBy: 'did:key:z6MkCreator',
+      etag: '"etag-7"',
+      metaEtag: '"etag-3"'
     })
   })
 
-  it('leaves an absent field absent rather than writing undefined', () => {
+  it('leaves every absent field absent rather than writing undefined', () => {
     const target: OptionalBodyFields = {}
     copyOptionalBodyFields({ source: { data: { a: 1 } }, target })
-    expect('createdBy' in target).toBe(false)
-    expect('epoch' in target).toBe(false)
+    expect(target).toStrictEqual({ data: { a: 1 } })
+    for (const field of [
+      'metaVersion',
+      'custom',
+      'epoch',
+      'createdBy',
+      'etag',
+      'metaEtag'
+    ]) {
+      expect(field in target, field).toBe(false)
+    }
   })
 })

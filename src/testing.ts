@@ -44,7 +44,9 @@ export function stubSyncPort(
 
 /**
  * A memory {@link SyncSchedule}: registered intervals fire only when the test
- * calls `tick()`, so a poll cycle is driven rather than waited for.
+ * calls `tick()`, so a poll cycle is driven rather than waited for. Each
+ * registration's `ms` is recorded rather than honored, so a test can read back
+ * the poll rate it asked for.
  */
 export interface MemorySchedule extends SyncSchedule {
   /**
@@ -55,6 +57,11 @@ export interface MemorySchedule extends SyncSchedule {
    * How many intervals are currently registered.
    */
   pending: () => number
+  /**
+   * The `ms` each currently registered interval was registered with, in
+   * registration order.
+   */
+  intervalsMs: () => number[]
 }
 
 /**
@@ -63,35 +70,44 @@ export interface MemorySchedule extends SyncSchedule {
  * @returns {MemorySchedule}
  */
 export function memorySchedule(): MemorySchedule {
-  const handlers = new Map<number, () => void>()
+  const intervals = new Map<number, { handler: () => void; ms: number }>()
   let nextHandle = 1
   return {
-    setInterval(handler: () => void): unknown {
+    setInterval(handler: () => void, ms: number): unknown {
       const handle = nextHandle++
-      handlers.set(handle, handler)
+      intervals.set(handle, { handler, ms })
       return handle
     },
     clearInterval(handle: unknown): void {
-      handlers.delete(handle as number)
+      intervals.delete(handle as number)
     },
     tick(): void {
-      for (const handler of [...handlers.values()]) {
+      for (const { handler } of [...intervals.values()]) {
         handler()
       }
     },
     pending(): number {
-      return handlers.size
+      return intervals.size
+    },
+    intervalsMs(): number[] {
+      return [...intervals.values()].map(({ ms }) => ms)
     }
   }
 }
 
 /**
  * A memory {@link SyncOnlineSource} the test drives: `setOnline(false)` makes
- * the poll tick skip, and `goOnline()` fires every reconnect subscriber.
+ * the poll tick skip, `goOnline()` fires every reconnect subscriber, and
+ * `subscribers()` counts the live ones, so a test can tell an unsubscribed
+ * callback from one that fired into a no-op.
  */
 export interface MemoryOnlineSource extends SyncOnlineSource {
   setOnline: (online: boolean) => void
   goOnline: () => void
+  /**
+   * How many reconnect callbacks are currently subscribed.
+   */
+  subscribers: () => number
 }
 
 /**
@@ -122,6 +138,9 @@ export function memoryOnlineSource({
       for (const subscriber of [...subscribers]) {
         subscriber()
       }
+    },
+    subscribers(): number {
+      return subscribers.size
     }
   }
 }

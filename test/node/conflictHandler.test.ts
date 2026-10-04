@@ -1,7 +1,7 @@
 /*!
  * Copyright (c) 2026 Interop Alliance. All rights reserved.
  */
-import { beforeEach, describe, it, expect } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
 import { captureLogger } from '@interop/logger'
 
 import type { Json, SyncedDoc, WithDeleted } from '../../src/types.js'
@@ -131,13 +131,23 @@ function logged(level: 'warn' | 'error') {
 }
 
 describe('makeLwwConflictHandler', () => {
-  it('isEqual is true only when body + deletion agree', () => {
+  it('isEqual is true only when data, custom, and deletion agree', () => {
     const a = row({ updatedAt: 't1', writerId: 'd1' })
     const b = row({ updatedAt: 't1', writerId: 'd1' })
     const c = row({ updatedAt: 't2', writerId: 'd1' })
     expect(handler.isEqual(a, b)).toBe(true)
     expect(handler.isEqual(a, c)).toBe(false)
     expect(handler.isEqual(a, { ...b, _deleted: true })).toBe(false)
+    // A metadata-only difference: same content, a different `custom` body.
+    const withCustom = row(
+      { updatedAt: 't1', writerId: 'd1' },
+      { custom: { jwe: 'C0' } }
+    )
+    expect(handler.isEqual(withCustom, { ...withCustom })).toBe(true)
+    expect(
+      handler.isEqual(withCustom, { ...withCustom, custom: { jwe: 'C1' } })
+    ).toBe(false)
+    expect(handler.isEqual(withCustom, a)).toBe(false)
   })
 
   it('isEqual is false when only the server revision differs (feed echo)', () => {
@@ -203,6 +213,8 @@ describe('makeLwwConflictHandler', () => {
   })
 
   it('keeps a live local edit over a remote tombstone', async () => {
+    // A tombstone has nothing to decrypt: it is absent, not undecryptable, so
+    // the edit wins by the tombstone rule with no warning logged.
     const remote = row(null, { deleted: true, version: 3 })
     const local = row({ updatedAt: 'T', writerId: 'dA' })
     const winner = await handler.resolve({
@@ -210,6 +222,7 @@ describe('makeLwwConflictHandler', () => {
       newDocumentState: local
     })
     expect(winner).toBe(local)
+    expect(logged('warn')).toEqual([])
   })
 
   it('defaults to the primary when incomparable (local tombstone)', async () => {
@@ -239,10 +252,12 @@ describe('makeLwwConflictHandler', () => {
   })
 
   it('re-asserts a local edit on a version-only conflict', async () => {
-    const payload = { updatedAt: 'T1', writerId: 'dA' }
+    // The edit's stamp is OLDER than the primary's, so rule 4 would pick the
+    // primary: only the version-only rule yields the local edit.
+    const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
     const assumed = row(payload, { version: 0 })
     const primary = row(payload, { version: 1 })
-    const edit = row({ updatedAt: 'T2', writerId: 'dA' })
+    const edit = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
     const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: edit,
@@ -264,6 +279,7 @@ describe('makeLwwConflictHandler', () => {
       assumedMasterState: assumed
     })
     expect(winner).toBe(primary)
+    expect(logged('warn')).toEqual([])
   })
 
   it('lets the real primary win for custom on a metadata-only conflict (no data change)', async () => {
@@ -299,7 +315,9 @@ describe('makeLwwConflictHandler', () => {
   it('re-asserts local state on a version-only conflict when custom is also unchanged', async () => {
     // Both `data` and `custom` match the assumed primary (only the revision
     // moved), so rule 1 fires even though metadata exists: keep the local edit.
-    const payload = { updatedAt: 'T1', writerId: 'dA' }
+    // The edit's stamp is OLDER than the primary's, so rule 4 would pick the
+    // primary: only the version-only rule yields the local edit.
+    const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
     const assumed = row(payload, {
       version: 0,
       metaVersion: 1,
@@ -311,7 +329,7 @@ describe('makeLwwConflictHandler', () => {
       custom: { jwe: 'C0' }
     })
     const edit = row(
-      { updatedAt: 'T2', writerId: 'dA' },
+      { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
       { version: 0, metaVersion: 1, custom: { jwe: 'C0' } }
     )
     const winner = await handler.resolve({
@@ -370,31 +388,6 @@ describe('makeLwwConflictHandler', () => {
     })
     expect(winner).toBe(primary)
     expect(logged('warn')).toHaveLength(1)
-  })
-
-  it('still treats a tombstone as absent, not as undecryptable', async () => {
-    // Regression for the three-kind split: a tombstone has nothing to decrypt,
-    // so the tombstone rules must still apply -- a live local edit beats a
-    // remote tombstone, and a local tombstone loses to a real remote change --
-    // with no warning logged.
-    const localEdit = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
-    expect(
-      await handler.resolve({
-        realMasterState: row(null, { deleted: true, version: 3 }),
-        newDocumentState: localEdit
-      })
-    ).toBe(localEdit)
-
-    const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
-    const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
-    expect(
-      await handler.resolve({
-        realMasterState: primary,
-        newDocumentState: row(null, { deleted: true }),
-        assumedMasterState: assumed
-      })
-    ).toBe(primary)
-    expect(logged('warn')).toEqual([])
   })
 
   it('re-asserts a local tombstone against a remote tombstone race (both deleted)', async () => {
@@ -495,24 +488,12 @@ describe('makeConflictHandler', () => {
     expect(logged('error')[0]).toMatchObject({ data: { id: 'r1' }, err: boom })
   })
 
-  it('warns from the packaged resolver at warn, not error', async () => {
-    await handler.resolve({
-      realMasterState: sealedRow(2),
-      newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
-    })
-    expect(logged('warn')).toHaveLength(1)
-    expect(logged('error')).toEqual([])
-  })
-
   it('keeps the default isEqual, and takes an injected one', () => {
     const equal = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
     const echo = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 2 })
-    expect(
-      makeConflictHandler({ resolve: async () => 'remote' }).isEqual(
-        equal,
-        echo
-      )
-    ).toBe(false)
+    const defaulted = makeConflictHandler({ resolve: async () => 'remote' })
+    expect(defaulted.isEqual(equal, { ...equal })).toBe(true)
+    expect(defaulted.isEqual(equal, echo)).toBe(false)
     expect(
       makeConflictHandler({
         resolve: async () => 'remote',
@@ -523,21 +504,41 @@ describe('makeConflictHandler', () => {
 })
 
 describe('lwwResolver decrypt addressing and integrity', () => {
-  it("addresses each side by the row's own id, not the body's", async () => {
+  it("addresses each side by the row's own id, not the envelope's or the body's", async () => {
     // The cipher checks the envelope against the id it is read under, so the
     // addressed id has to come from the ROW. An id read back out of the
     // decrypted body would check the envelope against itself.
     const resolve = lwwResolver({ decrypt })
-    // A stale id inside each payload: it must never be the one addressed.
-    const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
-    primary.data = { jwe: { updatedAt: 'T2', writerId: 'dB', id: 'not-this' } }
-    const local = row({ updatedAt: 'T1', writerId: 'dA' })
-    local.data = { jwe: { updatedAt: 'T1', writerId: 'dA', id: 'not-this' } }
+    // Decoy ids everywhere a wrong source could read one: a top-level `id` on
+    // each envelope, and a stale `id` inside each decrypted payload. The two
+    // rows carry distinct ids, so reading one side's id for the other fails
+    // too.
+    const primary = row(
+      { updatedAt: 'T2', writerId: 'dB' },
+      { version: 2, id: 'row-primary' }
+    )
+    primary.data = {
+      id: 'envelope-decoy-primary',
+      jwe: { updatedAt: 'T2', writerId: 'dB', id: 'body-decoy' }
+    }
+    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { id: 'row-local' })
+    local.data = {
+      id: 'envelope-decoy-local',
+      jwe: { updatedAt: 'T1', writerId: 'dA', id: 'body-decoy' }
+    }
 
     await resolve({ realMasterState: primary, newDocumentState: local })
 
     expect(decryptCalls).toHaveLength(2)
-    expect(decryptCalls.map(call => call.id)).toEqual(['r1', 'r1'])
+    // Each call pairs a row's own id with that same row's envelope.
+    expect(
+      new Map(decryptCalls.map(call => [call.id, call.envelope]))
+    ).toStrictEqual(
+      new Map([
+        ['row-primary', primary.data],
+        ['row-local', local.data]
+      ])
+    )
     // was-client resolves a Blob only for a chunked envelope read WITH the
     // context that fetches the chunks, so passing none is what keeps a body
     // the LWW rules cannot compare out of reach.
@@ -614,42 +615,31 @@ describe('lwwResolver decrypt addressing and integrity', () => {
   })
 })
 
-describe('lwwResolver undecryptable scoring', () => {
-  it('scores an undecryptable side apart from an absent one', async () => {
-    const resolve = lwwResolver({ decrypt })
-    const olderLocal = row({
-      updatedAt: '2026-01-01T00:00:00Z',
-      writerId: 'dA'
-    })
-
-    // An UNDECRYPTABLE remote is presumed newer: the remote wins even though
-    // the local row carries a readable stamp.
-    await expect(
-      resolve({
-        realMasterState: sealedRow(2),
-        newDocumentState: olderLocal
-      })
-    ).resolves.toBe('remote')
-
-    // A remote with NOTHING to compare (a tombstone) is absent, not
-    // unreadable: the live local edit wins instead.
-    await expect(
-      resolve({
-        realMasterState: row(null, { deleted: true, version: 2 }),
-        newDocumentState: olderLocal
-      })
-    ).resolves.toBe('local')
-  })
-
-  it('warns through the seam with nothing reaching the console', async () => {
-    const resolve = lwwResolver({ decrypt })
-    await expect(
-      resolve({
-        realMasterState: sealedRow(2),
-        newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
-      })
-    ).resolves.toBe('remote')
-    expect(logged('warn')).toHaveLength(1)
-    expect(logged('warn')[0]?.msg).toContain('did not decrypt')
+describe('lwwResolver undecryptable warnings', () => {
+  it('warns through the seam at warn, with nothing at error or on the console', async () => {
+    // Through the packaged handler, so the wrapper's error path is covered
+    // too: it logs only for a resolver that throws.
+    const consoleSpies = (
+      ['debug', 'info', 'log', 'warn', 'error'] as const
+    ).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
+    try {
+      const primary = sealedRow(2)
+      await expect(
+        handler.resolve({
+          realMasterState: primary,
+          newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
+        })
+      ).resolves.toBe(primary)
+      expect(logged('warn')).toHaveLength(1)
+      expect(logged('warn')[0]?.msg).toContain('did not decrypt')
+      expect(logged('error')).toEqual([])
+      for (const spy of consoleSpies) {
+        expect(spy).not.toHaveBeenCalled()
+      }
+    } finally {
+      for (const spy of consoleSpies) {
+        spy.mockRestore()
+      }
+    }
   })
 })

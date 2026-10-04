@@ -13,29 +13,44 @@ import { syncedDocSchema } from '../../src/syncedDocSchema.js'
 
 describe('syncedDocSchema', () => {
   it('ships the merged shape at version 0', () => {
-    const schema = syncedDocSchema()
-    expect(schema.version).toBe(0)
-    expect(schema.primaryKey).toBe('id')
-    expect(Object.keys(schema.properties).sort()).toEqual([
-      'createdBy',
-      'custom',
-      'data',
-      'epoch',
-      'etag',
-      'id',
-      'metaEtag',
-      'metaVersion',
-      'updatedAt',
-      'version'
-    ])
-    expect(schema.required).toEqual(['id', 'updatedAt', 'version'])
-    expect(schema.indexes).toEqual(['updatedAt'])
+    // The full literal, not a key list: RxDB's schema hash covers every member,
+    // so a changed type, maxLength, or additionalProperties strands a replica.
+    expect(syncedDocSchema()).toStrictEqual({
+      version: 0,
+      primaryKey: 'id',
+      type: 'object',
+      properties: {
+        id: { type: 'string', maxLength: 256 },
+        updatedAt: { type: 'string', maxLength: 64 },
+        version: { type: 'number' },
+        metaVersion: { type: 'number' },
+        createdBy: { type: 'string', maxLength: 256 },
+        epoch: { type: 'string', maxLength: 256 },
+        etag: { type: 'string', maxLength: 256 },
+        metaEtag: { type: 'string', maxLength: 256 },
+        data: { type: 'object', additionalProperties: true },
+        custom: { type: 'object', additionalProperties: true }
+      },
+      required: ['id', 'updatedAt', 'version'],
+      indexes: ['updatedAt']
+    })
   })
 
   it('returns a fresh object per call, so a caller cannot mutate the shape', () => {
     const first = syncedDocSchema()
+    first.properties['id']!['maxLength'] = 1
+    first.properties['extra'] = { type: 'string' }
+    first.required.push('extra')
+    first.indexes.push('extra')
+
     const second = syncedDocSchema()
-    expect(first).not.toBe(second)
-    expect(first).toEqual(second)
+    expect(second).not.toBe(first)
+    expect(second.properties['id']).toStrictEqual({
+      type: 'string',
+      maxLength: 256
+    })
+    expect('extra' in second.properties).toBe(false)
+    expect(second.required).toStrictEqual(['id', 'updatedAt', 'version'])
+    expect(second.indexes).toStrictEqual(['updatedAt'])
   })
 })

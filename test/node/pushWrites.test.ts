@@ -436,7 +436,9 @@ describe('createPushHandler conflicts', () => {
   it('synthesizes a tombstone conflict when the resource is now absent', async () => {
     // The entry carries no etag and `version: 0`: the plain port's null
     // re-read says only that no live resource is there, and no local revision
-    // stands in for the server's.
+    // stands in for the server's. Its `updatedAt` is the new local state's,
+    // not the assumed primary's. A null re-read is not drift, so the refused
+    // delete is not re-issued.
     const port = fakePushPort({
       conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary: null
@@ -446,14 +448,22 @@ describe('createPushHandler conflicts', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
+          updatedAt: '2025-12-31T00:00:00Z',
           version: 4,
           etag: etagFor(4),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ version: 4, _deleted: true })
+        newDocumentState: newDoc({
+          updatedAt: '2026-01-01T00:00:00Z',
+          version: 4,
+          _deleted: true
+        })
       }
     ])
 
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(4) }
+    ])
     expect(conflicts).toEqual([
       {
         id: 'r1',
@@ -612,7 +622,7 @@ describe('createPushHandler write acks', () => {
     expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
   })
 
-  it('uses the acked etag on the next update push (no 412 in steady state)', async () => {
+  it('echoes the acked etag verbatim as If-Match on the next update push', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -626,17 +636,19 @@ describe('createPushHandler write acks', () => {
     // into the row, so the next push's assumed primary carries that etag.
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
     expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    const [createAck] = acks
+    const writtenBack = newDoc({
+      id: 'r1',
+      version: createAck!.version!,
+      etag: createAck!.etag!,
+      data: { a: 1 }
+    })
 
-    // Steady-state update: If-Match echoes the acked etag, no conflict.
+    // Update: the assumed primary is the row the ack was written back into.
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          id: 'r1',
-          version: 1,
-          etag: etagFor(1),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ id: 'r1', version: 1, data: { a: 2 } })
+        assumedMasterState: writtenBack,
+        newDocumentState: { ...writtenBack, data: { a: 2 } }
       }
     ])
 
@@ -710,7 +722,93 @@ describe('createPushHandler write acks', () => {
 
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
 
-    expect(acks).toEqual([{ id: 'r1', version: 1 }])
+    // Strict: an `etag: undefined` member would read as "acked" downstream.
+    expect(acks).toStrictEqual([{ id: 'r1', version: 1 }])
+  })
+
+  it('reports the acked version and etag of a delete whose response carries them', async () => {
+    const port = fakePushPort()
+    port.deleteContent = async deleteOptions => {
+      port.writes.push({ kind: 'deleteContent', ...deleteOptions })
+      return { version: 8, etag: etagFor(8) }
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          version: 7,
+          etag: etagFor(7),
+          data: { a: 1 }
+        }),
+        newDocumentState: newDoc({ version: 7, _deleted: true })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(7) }
+    ])
+    expect(acks).toStrictEqual([{ id: 'r1', version: 8, etag: etagFor(8) }])
+  })
+
+  it('keeps only the content ack when the metadata write resolves no ack', async () => {
+    // A `/meta` write accepted with no revision in its response (the port
+    // resolves `undefined`) contributes nothing to the ack, and does not
+    // discard the content half's.
+    const port = fakePushPort()
+    port.putMeta = async metaOptions => {
+      port.writes.push({ kind: 'putMeta', ...metaOptions })
+      return undefined
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    const conflicts = await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          data: { a: 1 },
+          custom: { jwe: 'x' }
+        })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes.map(write => write.kind)).toEqual([
+      'putContent',
+      'putMeta'
+    ])
+    expect(acks).toStrictEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+  })
+
+  it('propagates an onWriteAccepted rejection out of push', async () => {
+    // The ack write-back failing rejects the batch, so RxDB re-sends it.
+    const port = fakePushPort()
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async () => {
+        throw new Error('write-back torn')
+      }
+    })
+
+    await expect(
+      push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
+    ).rejects.toThrow('write-back torn')
+    expect(port.writes).toEqual([
+      { kind: 'putContent', id: 'r1', data: { a: 1 }, ifNoneMatch: true }
+    ])
   })
 
   it('reports an etag-only ack when the validator carries no revision', async () => {
@@ -989,6 +1087,32 @@ describe('createPushHandler metadata 404 corroboration', () => {
     ).rejects.toMatchObject({ name: 'WasSyncAuthError', status: 403 })
   })
 
+  it('propagates a non-404 auth error on /meta without a corroborating re-read', async () => {
+    // Only a masked 404 is ambiguous. A 403 is an explicit refusal, so it
+    // escalates as-is. The scripted absent primary would turn a wrongful
+    // re-read into a tombstone conflict and resolve the batch.
+    const port = fakePushPort({ primary: null })
+    port.putMeta = async metaOptions => {
+      port.writes.push({ kind: 'putMeta', ...metaOptions })
+      throw new WasSyncAuthError(403)
+    }
+    const push = createPushHandler({ port })
+
+    await expect(
+      push([
+        {
+          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+          newDocumentState: newDoc({
+            version: 0,
+            data: { a: 1 },
+            custom: { jwe: 'mine' }
+          })
+        }
+      ])
+    ).rejects.toMatchObject({ name: 'WasSyncAuthError', status: 403 })
+    expect(port.getCalls).toEqual([])
+  })
+
   it('resolves a metadata-only edit against a gone primary on the default port', async () => {
     // The default port raises a /meta 404 as the plain not-found signal, not
     // the auth signal. Replica A deleted the resource; this replica edited
@@ -1010,6 +1134,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
+          updatedAt: '2025-12-31T00:00:00Z',
           version: 3,
           etag: etagFor(3),
           data: { a: 1 },
@@ -1018,6 +1143,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
           metaEtag: etagFor(1)
         }),
         newDocumentState: newDoc({
+          updatedAt: '2026-01-01T00:00:00Z',
           version: 3,
           etag: etagFor(3),
           data: { a: 1 },
@@ -1089,25 +1215,37 @@ describe('createPushHandler metadata 404 corroboration', () => {
  * A fake base port over an in-memory changes feed, served whole as one page.
  * `putContent` bumps the doc's feed `version` (so a re-read sees what an
  * accepted write produced) unless the id is in `conflictContent`; `putMeta`
- * conflicts for an id in `conflictMeta`. `queryCalls` counts feed walks --
- * what the batch's shared primary-read memo is meant to keep to one.
+ * conflicts for an id in `conflictMeta`. A `putContent` for an id in
+ * `holdContent` waits until a feed walk has read the feed, so the write lands
+ * after that walk memoized the pre-write state. `queryCalls` counts feed walks
+ * -- what the batch's shared primary-read memo is meant to keep to one.
  */
 function fakeFeedBase(options: {
   feed: WireDoc[]
   conflictContent?: string[]
   conflictMeta?: string[]
+  holdContent?: string[]
 }): WasSyncBasePort & { queryCalls: number } {
   const state = { queryCalls: 0 }
   const documents = new Map(options.feed.map(doc => [doc.id, { ...doc }]))
+  let releaseHeldContent: () => void = () => {}
+  const feedRead = new Promise<void>(resolve => {
+    releaseHeldContent = resolve
+  })
   return {
     get queryCalls() {
       return state.queryCalls
     },
     async query() {
       state.queryCalls++
-      return { documents: [...documents.values()], checkpoint: null }
+      const snapshot = [...documents.values()].map(doc => ({ ...doc }))
+      releaseHeldContent()
+      return { documents: snapshot, checkpoint: null }
     },
     async putContent({ id, data }) {
+      if (options.holdContent?.includes(id)) {
+        await feedRead
+      }
       if (options.conflictContent?.includes(id)) {
         throw new WasSyncConflictError()
       }
@@ -1168,13 +1306,16 @@ describe('createPushHandler batch primary re-reads', () => {
 
   it("reports the version a row's own accepted write produced", async () => {
     // r1 conflicts and walks the feed, memoizing every row it pages past. r2's
-    // content write is accepted and only its `/meta` write conflicts, so its
-    // conflict entry must carry the version that write just produced -- never a
-    // memo of the pre-write state (which is why such a row skips the memo).
+    // content write is held until that walk has read the feed, so the memo
+    // holds r2 at its pre-write version 4. The write is then accepted (version
+    // 5) and only r2's `/meta` write conflicts, so its conflict entry must
+    // carry the version that write just produced -- never the memo's
+    // pre-write state (which is why such a row skips the memo).
     const base = fakeFeedBase({
       feed: [feedDoc('r1', 9), feedDoc('r2', 4)],
       conflictContent: ['r1'],
-      conflictMeta: ['r2']
+      conflictMeta: ['r2'],
+      holdContent: ['r2']
     })
     const push = createPushHandler({ port: withFeedPrimaryRead(base) })
 
@@ -1294,37 +1435,6 @@ describe('createPushHandler benign delete retry', () => {
           version: 0,
           etag: etagFor(0),
           data: { a: 1, b: { c: 2, d: 3 } }
-        }),
-        newDocumentState: newDoc({ version: 0, _deleted: true })
-      }
-    ])
-
-    expect(conflicts).toEqual([])
-    expect(port.deletes).toEqual([etagFor(0), etagFor(1)])
-  })
-
-  it('converges a delete whose push ack write-back was torn', async () => {
-    // The ack write-back is best-effort: a create accepted as version 1 whose
-    // write-back never lands leaves the local row on version 0. The delete that
-    // follows sends the stale `If-Match` and is absorbed by the retry.
-    const port = driftingDeletePort({ serverVersion: 1, serverData: { a: 1 } })
-    const push = createPushHandler({
-      port,
-      onWriteAccepted: async () => {
-        throw new Error('write-back torn')
-      }
-    })
-
-    await expect(
-      push([{ newDocumentState: newDoc({ version: 0, data: { a: 1 } }) }])
-    ).rejects.toThrow('write-back torn')
-
-    const conflicts = await push([
-      {
-        assumedMasterState: newDoc({
-          version: 0,
-          etag: etagFor(0),
-          data: { a: 1 }
         }),
         newDocumentState: newDoc({ version: 0, _deleted: true })
       }
@@ -1566,33 +1676,10 @@ describe('createPushHandler delete of an absent resource', () => {
         ifNoneMatch: true
       }
     ])
+    // Already gone is the goal state, not a conflict: nothing is re-read.
+    expect(port.getCalls).toEqual([])
     // No revision is acked for the absent row; the sibling's create is.
     expect(acks).toEqual([{ id: 'sibling', version: 1, etag: etagFor(1) }])
-  })
-
-  it('treats a not-found delete conditional on an assumed revision as already gone', async () => {
-    // Deleted remotely first: the local row still assumes a live primary.
-    const port = fakePushPort({
-      notFoundOn: { kind: 'deleteContent', id: 'r1' }
-    })
-    const push = createPushHandler({ port })
-
-    const conflicts = await push([
-      {
-        assumedMasterState: newDoc({
-          version: 3,
-          etag: etagFor(3),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 3, data: { a: 1 }, _deleted: true })
-      }
-    ])
-
-    expect(conflicts).toEqual([])
-    expect(port.writes).toEqual([
-      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(3) }
-    ])
-    expect(port.getCalls).toEqual([])
   })
 
   it('treats a not-found on the benign-412 re-issued delete as already gone', async () => {
