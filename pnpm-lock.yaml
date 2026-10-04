@@ -28,8 +28,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@interop/was-client':
-        specifier: ^0.87.0
-        version: 0.87.0(@interop/jsonld-signatures@11.8.6)
+        specifier: ^0.89.0
+        version: 0.89.0(@interop/jsonld-signatures@11.8.6)
       '@playwright/test':
         specifier: ^1.60.0
         version: 1.63.0
@@ -281,16 +281,16 @@ packages:
     resolution: {integrity: sha512-yP4M/oquqFvFwjqq2YUj7mh7Fs0vcc/UEmVDtHL/P9WkH1EXlGX0I0676Kgjoj5fmxyPXhwup/M/ndmUe1Hl1w==}
     engines: {node: '>=22.0'}
 
-  '@interop/storage-core@0.29.0':
-    resolution: {integrity: sha512-qsFnOCLSG748SG0AHQLUzCaQGcD7MRY2lXWA93FxaQ3ug8deBI2dcbkwke18NpqkTi6OO/Q4qwIlgu6suO3Opw==}
+  '@interop/storage-core@0.33.0':
+    resolution: {integrity: sha512-65eP8CACrov0achUsF9kMpq3Z61D1vBStlrDEKfkLF2F5/uaIkCBKEUjBnkcCwf2f02HXjyMG4I6ovbQ/ll9QQ==}
     engines: {node: '>=22.0'}
 
   '@interop/vh-resource-log@0.6.1':
     resolution: {integrity: sha512-BpI671YUckiuvVsi/Ns6rvP3vIo4bBq5iiY0kVsH4v+KLvHeHhu+0zfu0Ed6fs7WRftZVWuEb6EmgbTBBqjqmA==}
     engines: {node: '>=24.0'}
 
-  '@interop/was-client@0.87.0':
-    resolution: {integrity: sha512-KsqvbVsQdjcRg1ezh0gNtV9wakdpFM6/Dflkty3gEZ5Y2NFwzCpNNZxJsl3s2TW0YtuE2RxSWBSKCev+032w4Q==}
+  '@interop/was-client@0.89.0':
+    resolution: {integrity: sha512-xAESTPuDTzEqy6/0RecGp1xF4yPFNmHH3+lPJfNlHsYyOmuOBEdwag4QN5p9soR+uP4GG4Dx32GtpH2FnDVdbA==}
     engines: {node: '>=24.0'}
 
   '@interop/x25519-key-agreement-key@5.4.1':
@@ -1738,7 +1738,7 @@ snapshots:
     dependencies:
       '@interop/data-integrity-core': 8.8.0
 
-  '@interop/storage-core@0.29.0':
+  '@interop/storage-core@0.33.0':
     dependencies:
       '@interop/data-integrity-core': 8.8.0
 
@@ -1747,7 +1747,7 @@ snapshots:
       '@interop/did-method-webvh': 5.11.1
       '@interop/storage-core': 0.28.0
 
-  '@interop/was-client@0.87.0(@interop/jsonld-signatures@11.8.6)':
+  '@interop/was-client@0.89.0(@interop/jsonld-signatures@11.8.6)':
     dependencies:
       '@interop/capability-agent': 0.2.1
       '@interop/data-integrity-core': 8.8.0
@@ -1756,7 +1756,7 @@ snapshots:
       '@interop/ezcap': 7.5.0
       '@interop/http-client': 1.0.5
       '@interop/minimal-cipher': 7.10.3
-      '@interop/storage-core': 0.29.0
+      '@interop/storage-core': 0.33.0
       '@interop/vh-resource-log': 0.6.1
       '@interop/x25519-key-agreement-key': 5.4.1
       '@noble/hashes': 2.4.0
