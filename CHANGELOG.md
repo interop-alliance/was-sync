@@ -30,6 +30,10 @@
 
 ### Changed
 
+- Docs: ARCHITECTURE.md records that was-client's sync port (0.89.0) filters the
+  widened `changes` feed. It hands on JSON Resources and their tombstones only,
+  with `deleted` renamed `_deleted`, so the pull handler and the feed primary
+  read filter nothing themselves.
 - Tests: the integration suite boots through `was-teaching-server/testing`
   (`startTestServer`, `openTempBackend`), against the server's 0.40.0 release.
 - Tests: an audit of the suites for tautological and inert tests. The `hasAck()`

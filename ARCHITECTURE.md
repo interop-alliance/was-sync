@@ -287,6 +287,18 @@ numbered so items and reviews can cite them.
 - **A WAS request, an error class, or a wire name** belongs to
   `@interop/was-client` (`./sync` for the port, the vocabulary, and the four
   `err.name` predicates). This package speaks no WAS HTTP itself.
+- **Which `changes` feed entries reach the driver** belongs to was-client's sync
+  port. The feed carries every record kind of a Collection, discriminated on
+  `kind`, and marks a tombstone with `deleted`. Since was-client 0.89.0 the
+  port's `query` hands on the `kind: 'resource'` entries with a JSON content
+  type and their tombstones only. It skips the Collection's own records
+  (`collection-metadata`, `log`), a binary or `text/jsonl` Resource, and a kind
+  it does not know, and renames `deleted` to `_deleted`. A page it would return
+  empty is resumed from its checkpoint until it holds a document or the feed
+  ends, since RxDB drops an empty page before it stores the checkpoint. The pull
+  handler and the feed primary read therefore map every document they receive
+  and filter nothing themselves. The skipped kinds and the non-JSON-Resource
+  outcome are tested in was-client.
 - **The last-write-wins comparison** belongs to `@interop/social-core`
   (`remotePayloadWins`). This package reads the stamp off a payload
   (`lwwFields`) and applies whichever comparator it is handed.
@@ -344,9 +356,12 @@ the byoe-ecosystem layer map instead.
   with `Object.assign`, which would scatter a bare string into index-keyed
   characters, so the string is wrapped for RxDB and unwrapped for the port.
   Avoid: RxDB checkpoint, checkpoint object.
-- **Wire doc** -- one document as it travels on the `changes` feed (`WireDoc`).
-  Contrast the **synced doc** (`SyncedDoc`), the same document as the local
-  replica stores it. Avoid: change document, row payload.
+- **Wire doc** -- one JSON Resource document of the `changes` feed as the sync
+  port hands it on (`WireDoc`), with the feed's `deleted` renamed `_deleted`.
+  Contrast the **change document**, any entry of the raw feed whatever its
+  `kind`, which the driver never sees (see Ownership heuristics), and the
+  **synced doc** (`SyncedDoc`), the same document as the local replica stores
+  it. Avoid: row payload.
 - **Conflict entry** -- the primary state the push handler returns for a row the
   server refused, which is what RxDB's push contract asks for. Avoid: conflict
   result, rejection.

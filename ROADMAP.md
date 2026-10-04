@@ -117,14 +117,21 @@ leaves the content record's `updatedAt` unchanged.
 - labels: pull, feed, correctness, was-96
 - touches:
   - was-sync (ARCHITECTURE.md Glossary `Wire doc`, invariant 4's feed primary
-    read, README)
+    read, README): Glossary and Ownership heuristics updated 2026-10-04; README
+    needed no change
   - was-client (whether the sync port filters the feed to `kind: resource` and
     renames `deleted` before the driver sees it, or exposes the raw document;
-    `WireDoc` vocabulary; ARCHITECTURE/AGENTS)
-  - wallet-core (the engine applies the same feed; its own filter)
-  - dcw, was-react (named by WAS-96 as consumers that filter on `kind`)
+    `WireDoc` vocabulary; ARCHITECTURE/AGENTS): was-client: WCL-122 (the port
+    filters and renames; 0.89.0, publish pending)
+  - wallet-core (the engine applies the same feed; its own filter): unaffected:
+    wallet-core (it reads `WireDoc` off the sync port and calls no `changes()`
+    of its own)
+  - dcw, was-react (named by WAS-96 as consumers that filter on `kind`):
+    was-react: WR-55 (its `SharedCollectionReader` reads `changes()` directly);
+    unaffected: dcw (it reads the feed only through the sync port, driven by
+    wallet-core's engine)
 - acceptance:
-  - [ ] The ownership of the `kind` filter and the `deleted` rename is settled
+  - [x] The ownership of the `kind` filter and the `deleted` rename is settled
         with was-client, and recorded in both repos' ARCHITECTURE files
   - [ ] The pull handler and the feed primary read skip every change document
         whose `kind` is not `resource`, and a `kind` they do not know. The pull
@@ -135,7 +142,7 @@ leaves the content record's `updatedAt` unchanged.
   - [ ] A unit case drives the pull handler with an all-filtered page followed
         by a resource page and asserts the resource page's checkpoint is the one
         returned
-  - [ ] A `kind: resource` entry whose `contentType` is not JSON (no inline
+  - [x] A `kind: resource` entry whose `contentType` is not JSON (no inline
         `data`) takes a documented outcome: skipped, or stored as a bodiless row
   - [ ] The feed's `deleted` member reaches RxDB as `_deleted`, on the pulled
         row and on the primary state the push path re-reads
@@ -158,6 +165,17 @@ a binary resource as a row with no body. The wire vocabulary is was-client's,
 and RxDB's view of the feed is this driver's, so where the filter lives is the
 first question. WS-23 depends on this item: its schema work needs the pull
 boundary to deliver resource documents only.
+
+Resolution of the ownership question (2026-10-04): was-client's sync port owns
+the filter and the rename (was-client 0.89.0). Its `query` hands on JSON
+`resource` entries and their tombstones only, maps `deleted` to `_deleted`, and
+resumes past a page it skipped entirely, so the driver's handlers filter
+nothing. A non-JSON Resource is skipped. The open boxes are met once was-client
+0.89.0 is consumed. That lands with WS-23's source change, since the source here
+still reads `version` and does not compile against was-client 0.87.0 or later.
+The unit cases for the skipped kinds live in was-client's sync port tests; here
+an integration case against a server release that ships the widened feed would
+pin the boundary end to end.
 
 ### WS-25: Stop sending `writerId` on the `/meta` write
 
