@@ -8,6 +8,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { WasSyncCheckpointError } from '@interop/was-client/sync'
 import { createPullHandler, wireDocToRxDoc } from '../../src/changesQuery.js'
+import { wire } from './fixtures.js'
 import type {
   SyncCheckpoint,
   SyncedDoc,
@@ -44,81 +45,80 @@ function fakePullPort(
 
 describe('wireDocToRxDoc', () => {
   it('maps a live content document, nesting the body under data', () => {
-    const doc: WireDoc = {
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      data: { hello: 'world' }
-    }
-    expect(wireDocToRxDoc(doc)).toEqual({
+    const doc = wire({ id: 'abc', data: { hello: 'world' } })
+    expect(wireDocToRxDoc(doc)).toStrictEqual({
       id: 'abc',
       updatedAt: '2026-01-01T00:00:00Z',
-      version: 3,
+      updatedAtCounter: 1,
+      originId: 'origin-a',
       data: { hello: 'world' },
       _deleted: false
     })
   })
 
-  it('carries metaVersion and the custom envelope when present', () => {
-    const doc: WireDoc = {
+  it('maps the content stamp verbatim, a zero counter included, with no version', () => {
+    const rx = wireDocToRxDoc(
+      wire({ id: 'abc', updatedAtCounter: 0, originId: 'origin-z' })
+    )
+    expect(rx.updatedAtCounter).toBe(0)
+    expect(rx.originId).toBe('origin-z')
+    expect('version' in rx).toBe(false)
+    expect('metaVersion' in rx).toBe(false)
+  })
+
+  it('carries the nested meta stamp and the custom envelope when present', () => {
+    const meta = {
+      updatedAt: '2026-01-01T00:00:05Z',
+      updatedAtCounter: 0,
+      originId: 'origin-b',
+      generation: 'gen-1'
+    }
+    const doc = wire({
       id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      metaVersion: 2,
+      meta,
       data: { hello: 'world' },
       custom: { jwe: { ciphertext: '...' } }
-    }
-    expect(wireDocToRxDoc(doc)).toEqual({
+    })
+    expect(wireDocToRxDoc(doc)).toStrictEqual({
       id: 'abc',
       updatedAt: '2026-01-01T00:00:00Z',
-      version: 3,
-      metaVersion: 2,
+      updatedAtCounter: 1,
+      originId: 'origin-a',
+      meta,
       data: { hello: 'world' },
       custom: { jwe: { ciphertext: '...' } },
       _deleted: false
     })
   })
 
+  it('maps no meta for a document without one', () => {
+    const rx = wireDocToRxDoc(wire({ id: 'abc', data: { hello: 'world' } }))
+    expect('meta' in rx).toBe(false)
+    expect('custom' in rx).toBe(false)
+  })
+
   it('carries the key epoch when the feed stamps one, and omits it otherwise', () => {
-    const stamped = wireDocToRxDoc({
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      data: { hello: 'world' },
-      epoch: 'e2'
-    })
+    const stamped = wireDocToRxDoc(
+      wire({ id: 'abc', data: { hello: 'world' }, epoch: 'e2' })
+    )
     expect(stamped.epoch).toBe('e2')
-    const unstamped = wireDocToRxDoc({
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      data: { hello: 'world' }
-    })
+    const unstamped = wireDocToRxDoc(
+      wire({ id: 'abc', data: { hello: 'world' } })
+    )
     expect('epoch' in unstamped).toBe(false)
   })
 
   it('carries the server-managed createdBy on a live document', () => {
-    const doc: WireDoc = {
+    const doc = wire({
       id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
       createdBy: 'did:key:z6MkCreator',
       data: { hello: 'world' }
-    }
-    expect(wireDocToRxDoc(doc)).toEqual({
+    })
+    expect(wireDocToRxDoc(doc)).toStrictEqual({
       id: 'abc',
       updatedAt: '2026-01-01T00:00:00Z',
-      version: 3,
+      updatedAtCounter: 1,
+      originId: 'origin-a',
       createdBy: 'did:key:z6MkCreator',
       data: { hello: 'world' },
       _deleted: false
@@ -126,19 +126,19 @@ describe('wireDocToRxDoc', () => {
   })
 
   it('carries the server-managed createdBy on a tombstone', () => {
-    const doc: WireDoc = {
+    const doc = wire({
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
-      checkpoint: 'cp',
-      version: 4,
+      updatedAtCounter: 2,
       createdBy: 'did:key:z6MkCreator'
-    }
+    })
     const rx = wireDocToRxDoc(doc)
-    expect(rx).toEqual({
+    expect(rx).toStrictEqual({
       id: 'gone',
       updatedAt: '2026-01-02T00:00:00Z',
-      version: 4,
+      updatedAtCounter: 2,
+      originId: 'origin-a',
       createdBy: 'did:key:z6MkCreator',
       _deleted: true
     })
@@ -147,23 +147,18 @@ describe('wireDocToRxDoc', () => {
   })
 
   it('carries the opaque etag and metaEtag validators when present', () => {
-    const doc: WireDoc = {
+    const doc = wire({
       id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      metaVersion: 2,
       data: { hello: 'world' },
       custom: { jwe: { ciphertext: '...' } },
       etag: '"3mJr7AoUXx2.3"',
       metaEtag: '"9pQz1BbVYy4.2"'
-    }
-    expect(wireDocToRxDoc(doc)).toEqual({
+    })
+    expect(wireDocToRxDoc(doc)).toStrictEqual({
       id: 'abc',
       updatedAt: '2026-01-01T00:00:00Z',
-      version: 3,
-      metaVersion: 2,
+      updatedAtCounter: 1,
+      originId: 'origin-a',
       data: { hello: 'world' },
       custom: { jwe: { ciphertext: '...' } },
       etag: '"3mJr7AoUXx2.3"',
@@ -173,67 +168,44 @@ describe('wireDocToRxDoc', () => {
   })
 
   it('omits etag and metaEtag when the server recorded neither', () => {
-    const doc: WireDoc = {
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      data: { hello: 'world' }
-    }
-    const rx = wireDocToRxDoc(doc)
+    const rx = wireDocToRxDoc(wire({ id: 'abc', data: { hello: 'world' } }))
     expect('etag' in rx).toBe(false)
     expect('metaEtag' in rx).toBe(false)
   })
 
   it('omits createdBy when the server recorded no creator', () => {
-    const doc: WireDoc = {
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3,
-      data: { hello: 'world' }
-    }
+    const doc = wire({ id: 'abc', data: { hello: 'world' } })
     expect('createdBy' in wireDocToRxDoc(doc)).toBe(false)
   })
 
   it('projects a tombstone with no data and no metadata', () => {
-    const doc: WireDoc = {
+    const doc = wire({
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
-      checkpoint: 'cp',
-      version: 4
-    }
+      updatedAtCounter: 2
+    })
     const rx = wireDocToRxDoc(doc)
-    expect(rx).toEqual({
+    expect(rx).toStrictEqual({
       id: 'gone',
       updatedAt: '2026-01-02T00:00:00Z',
-      version: 4,
+      updatedAtCounter: 2,
+      originId: 'origin-a',
       _deleted: true
     })
     expect('data' in rx).toBe(false)
     expect('custom' in rx).toBe(false)
+    expect('meta' in rx).toBe(false)
   })
 
   it('does not carry the writerId into the local row, live or tombstone', () => {
-    const live: WireDoc = {
-      id: 'abc',
-      _deleted: false,
-      updatedAt: '2026-01-01T00:00:00Z',
-      checkpoint: 'cp',
-      version: 2,
-      etag: '"e2"',
-      data: { hello: 'world' }
-    }
-    const tombstone: WireDoc = {
+    const live = wire({ id: 'abc', etag: '"e2"', data: { hello: 'world' } })
+    const tombstone = wire({
       id: 'gone',
       _deleted: true,
       updatedAt: '2026-01-02T00:00:00Z',
-      checkpoint: 'cp',
-      version: 3
-    }
+      updatedAtCounter: 2
+    })
     const cases: Array<[WireDoc, WithDeleted<SyncedDoc>]> = [
       [
         live,
@@ -241,7 +213,8 @@ describe('wireDocToRxDoc', () => {
           id: 'abc',
           _deleted: false,
           updatedAt: '2026-01-01T00:00:00Z',
-          version: 2,
+          updatedAtCounter: 1,
+          originId: 'origin-a',
           etag: '"e2"',
           data: { hello: 'world' }
         }
@@ -252,7 +225,8 @@ describe('wireDocToRxDoc', () => {
           id: 'gone',
           _deleted: true,
           updatedAt: '2026-01-02T00:00:00Z',
-          version: 3
+          updatedAtCounter: 2,
+          originId: 'origin-a'
         }
       ]
     ]
@@ -268,13 +242,8 @@ describe('createPullHandler', () => {
   const cpA: SyncCheckpoint = 'opaque-checkpoint-a'
   const cpB: SyncCheckpoint = 'opaque-checkpoint-b'
   const updatedAt = '2026-01-01T00:00:01Z'
-  const doc = (id: string, checkpoint: SyncCheckpoint): WireDoc => ({
-    id,
-    _deleted: false,
-    updatedAt,
-    version: 1,
-    checkpoint
-  })
+  const doc = (id: string, checkpoint: SyncCheckpoint): WireDoc =>
+    wire({ id, updatedAt, checkpoint })
   const rejected = new WasSyncCheckpointError()
 
   /**

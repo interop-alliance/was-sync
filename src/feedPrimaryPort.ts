@@ -7,17 +7,18 @@
  * {@link WasSyncBasePort} (query + conditional writes) and adds the `get` the
  * conflict assembler needs, producing a full {@link WasSyncPort}.
  *
- * Why the feed body rather than a `GET` ETag header: the mutable-head model
- * settles a 412 by re-reading the resource's current `version` and comparing
- * payloads (LWW). A raw `GET` reads that `version` from the response's `etag`
- * header -- which a browser hides on a CROSS-ORIGIN response unless the server
- * sends `Access-Control-Expose-Headers: etag`. A server that does not expose it
- * would make a cross-origin re-read report `version: 0`, so the loser of a push
- * race would re-push forever with a stale `If-Match` and never converge. The
- * `changes` feed carries `version` (and `data`, `_deleted`, ...) in the JSON
- * BODY, which CORS never strips, so resolving the primary from the feed is both
+ * Why the feed body rather than a `GET`: the mutable-head model settles a 412
+ * by re-reading the resource's current validator and comparing payloads (LWW).
+ * A raw `GET` reports the validator in the response's `etag` header -- which a
+ * browser hides on a CROSS-ORIGIN response unless the server sends
+ * `Access-Control-Expose-Headers: etag`. A server that does not expose it would
+ * make a cross-origin re-read carry no `etag`, no stamp members, and no
+ * `writerId`, so the loser of a push race would re-push forever with a stale
+ * `If-Match` and never converge. The `changes` feed carries the validators, the
+ * write stamp, `writerId`, `data`, `_deleted`, and the rest in the JSON BODY,
+ * which CORS never strips, so resolving the primary from the feed is both
  * correct and origin-independent. Normal pull/push are unaffected (they already
- * read `version` from the feed body).
+ * read everything from the feed body).
  *
  * Opt-in at construction: a deployment whose server exposes the ETag (the
  * reference server does) needs none of this and passes was-client's port
@@ -42,13 +43,13 @@ const PAGE_SIZE = 500
 
 /**
  * Builds a `PrimaryState` from a `changes`-feed document (all fields in-body).
- * The feed's `writerId` label rides along explicitly: it is not one of the
- * optional body fields (the local row has no member for it), but the push
- * handler's delete retry reads it off the primary.
+ * The write stamp and the nested `meta` ride along with the other optional
+ * members. The feed's `writerId` label rides along explicitly: it is not one
+ * of the optional body fields (the local row has no member for it), but the
+ * push handler's delete retry reads it off the primary.
  */
 function toPrimaryState(doc: WireDoc): PrimaryState {
   const primary: PrimaryState = {
-    version: doc.version,
     updatedAt: doc.updatedAt,
     deleted: doc._deleted,
     ...(doc.writerId !== undefined && { writerId: doc.writerId })

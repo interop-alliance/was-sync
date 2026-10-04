@@ -38,7 +38,10 @@ function fakeFeedPort(count: number): WasSyncPort & {
     id: `doc-${index}`,
     _deleted: false,
     updatedAt: `2026-01-01T00:00:${String(index).padStart(2, '0')}Z`,
-    version: 1,
+    kind: 'resource',
+    contentType: 'application/json',
+    updatedAtCounter: 0,
+    originId: 'origin-a',
     checkpoint: `opaque:${index}`,
     data: { index }
   }))

@@ -65,13 +65,22 @@ describe('bodiesEqual', () => {
 })
 
 describe('copyOptionalBodyFields', () => {
+  const metaStamp = {
+    updatedAt: '2026-01-02T00:00:00.000Z',
+    updatedAtCounter: 3,
+    originId: 'origin-b',
+    generation: 'gen-1'
+  }
+
   it('carries every present optional field', () => {
     const target: OptionalBodyFields = {}
     copyOptionalBodyFields({
       source: {
         data: { a: 1 },
         custom: { b: 2 },
-        metaVersion: 3,
+        updatedAtCounter: 0,
+        originId: 'origin-a',
+        meta: metaStamp,
         epoch: 'epoch-1',
         createdBy: 'did:key:z6MkCreator',
         etag: '"etag-7"',
@@ -82,7 +91,9 @@ describe('copyOptionalBodyFields', () => {
     expect(target).toStrictEqual({
       data: { a: 1 },
       custom: { b: 2 },
-      metaVersion: 3,
+      updatedAtCounter: 0,
+      originId: 'origin-a',
+      meta: metaStamp,
       epoch: 'epoch-1',
       createdBy: 'did:key:z6MkCreator',
       etag: '"etag-7"',
@@ -90,12 +101,20 @@ describe('copyOptionalBodyFields', () => {
     })
   })
 
+  it('copies a zero updatedAtCounter, which is a valid stamp', () => {
+    const target: OptionalBodyFields = {}
+    copyOptionalBodyFields({ source: { updatedAtCounter: 0 }, target })
+    expect(target).toStrictEqual({ updatedAtCounter: 0 })
+  })
+
   it('leaves every absent field absent rather than writing undefined', () => {
     const target: OptionalBodyFields = {}
     copyOptionalBodyFields({ source: { data: { a: 1 } }, target })
     expect(target).toStrictEqual({ data: { a: 1 } })
     for (const field of [
-      'metaVersion',
+      'updatedAtCounter',
+      'originId',
+      'meta',
       'custom',
       'epoch',
       'createdBy',

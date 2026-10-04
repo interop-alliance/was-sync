@@ -29,6 +29,7 @@ export {
   type PrimaryState,
   type SyncCheckpoint,
   type ReplicationCheckpoint,
+  type ResourceMetaStamp,
   type SyncedDoc,
   type WasSyncBasePort,
   type WasSyncPort,

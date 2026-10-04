@@ -39,22 +39,22 @@ test('the root entry loads and works in a real browser, with no rxdb', async ({
     const decrypt = async ({ envelope }: { id: string; envelope: unknown }) =>
       (envelope as { jwe: unknown }).jwe
     const handler = makeLwwConflictHandler(decrypt)
-    const stamped = (updatedAt: string, version: number) => ({
+    const stamped = (updatedAt: string, etag: string) => ({
       id: 'r1',
       updatedAt: '2026-01-01T00:00:00Z',
-      version,
+      etag,
       _deleted: false,
       data: { jwe: { updatedAt, writerId: 'w1' } }
     })
     // Each direction once, so neither RxDB's remote-wins default nor a
     // local-wins rule would pass both.
     const remoteLater = await handler.resolve({
-      realMasterState: stamped('2026-02-02T00:00:00Z', 2),
-      newDocumentState: stamped('2026-01-01T00:00:00Z', 1)
+      realMasterState: stamped('2026-02-02T00:00:00Z', 'remote'),
+      newDocumentState: stamped('2026-01-01T00:00:00Z', 'local')
     })
     const localLater = await handler.resolve({
-      realMasterState: stamped('2026-01-01T00:00:00Z', 2),
-      newDocumentState: stamped('2026-02-02T00:00:00Z', 1)
+      realMasterState: stamped('2026-01-01T00:00:00Z', 'remote'),
+      newDocumentState: stamped('2026-02-02T00:00:00Z', 'local')
     })
 
     const writerId = getWriterId({
@@ -73,8 +73,8 @@ test('the root entry loads and works in a real browser, with no rxdb', async ({
     return {
       schemaVersion: syncedDocSchema().version,
       keyOrderEqual: bodiesEqual({ a: 1, b: 2 }, { b: 2, a: 1 }),
-      laterRemotePayloadWins: remoteLater.version === 2,
-      laterLocalPayloadWins: localLater.version === 1,
+      laterRemotePayloadWins: remoteLater.etag === 'remote',
+      laterLocalPayloadWins: localLater.etag === 'local',
       writerIdStable: writerId === again && writerId.length > 0,
       writerIdCleared: localStorage.getItem('was-sync-smoke:writerId') === null
     }

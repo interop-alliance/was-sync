@@ -120,9 +120,12 @@ function recordingWasClient(): {
       collection: (_id: string, options: { capability?: unknown }) => {
         collectionCapabilities.push(options.capability)
         return {
-          changes: async () => {
+          // was-client 0.89.0's sync port walks the feed through
+          // `resourceChanges()`, one page per iteration; an empty feed is one
+          // page with `checkpoint: null`.
+          resourceChanges: async function* () {
             changesCalls++
-            return { documents: [], checkpoint: null }
+            yield { documents: [], checkpoint: null }
           }
         }
       }

@@ -17,25 +17,40 @@
   `updatedAt` and never received the server-assigned `createdBy`. A consumer
   that overrode `isEqual` with a deep equality to get this behavior can drop the
   override (WS-6).
-- The ack write-back no longer stamps a `version` or `metaVersion` of `0`.
-  was-client's port acks `0` when the `ETag` is hidden from a cross-origin
-  caller or carries no revision. The row now keeps its last real revision until
-  the feed's echo brings the new one down (WS-7).
-- An accepted write whose `ETag` carries no parseable revision is now acked on
-  its `etag` / `metaEtag` alone, so the next conditional write echoes the
-  validator. The push handler previously reported such a write as having no ack.
-  A `412` re-read under such a validator reports `version: 0` in the conflict
-  entry. Follows was-client 0.86.0, where `WriteAck.version` and
-  `MasterState.version` are optional (WS-18).
+- An accepted write is acked on its `etag` / `metaEtag` alone, so the next
+  conditional write echoes the validator. The ack write-back patches validators
+  only. An accepted write whose `ETag` is hidden from a cross-origin caller
+  carries neither and acks nothing (WS-7, WS-18).
 
 ### Changed
 
+- **BREAKING**: the replica schema and `SyncedDoc` carry the server's write
+  stamp in place of the integer revisions. `version` and `metaVersion` are gone.
+  `updatedAtCounter`, `originId`, and the nested `meta` (`updatedAt`,
+  `updatedAtCounter`, `originId`, `generation`) are added, all optional, and
+  `required` is `['id', 'updatedAt']`. The schema version stays at `0`, so RxDB
+  refuses to open an existing replica with the new shape. The consumer must
+  forget every existing replica (remove the collection) and re-pull it. The
+  consumer must forget the collection's replication meta
+  (`rx-replication-meta-*`) with it or change its `replicationIdentifier`, or a
+  retained checkpoint resumes past every row and the new replica comes up empty.
+  Local writes not yet pushed at the update are lost.
+  - `PushWriteAck` is `{ id, etag?, metaEtag? }`.
+  - `statesEqual` compares `updatedAtCounter` and `originId` strictly and `meta`
+    canonically, in place of the revisions.
+  - The tombstone conflict entry carries only `id`, `updatedAt`, and
+    `_deleted: true`.
+  - The `/meta` write is an update when the assumed primary is not a tombstone
+    and carries `meta` or `metaEtag`. A tombstone sends `If-None-Match: *`.
+  - Requires `@interop/was-client` >= 0.89.0, the new peer range. The
+    integration suite runs against was-teaching-server 0.41.1 (WS-23).
 - Docs: ARCHITECTURE.md records that was-client's sync port (0.89.0) filters the
   widened `changes` feed. It hands on JSON Resources and their tombstones only,
   with `deleted` renamed `_deleted`, so the pull handler and the feed primary
-  read filter nothing themselves.
+  read filter nothing themselves. Consuming was-client 0.89.0 meets WS-24's pull
+  boundary filter.
 - Tests: the integration suite boots through `was-teaching-server/testing`
-  (`startTestServer`, `openTempBackend`), against the server's 0.40.0 release.
+  (`startTestServer`, `openTempBackend`), against the server's 0.41.1 release.
 - Tests: an audit of the suites for tautological and inert tests. The `hasAck()`
   memo bypass, the feed walk's page-to-page checkpoint forwarding, teardown
   awaiting `cancel()`, registration before subscription, and the controller's

@@ -3,18 +3,30 @@
  */
 /**
  * The single generic RxDB JSON schema reused across every synced collection.
- * One shape (`{ id, updatedAt, version, metaVersion?, createdBy?, epoch?,
- * etag?, metaEtag?, data?, custom? }`) carries both a content revision and an
- * independently-versioned metadata sub-resource; `_deleted` is added by RxDB via
- * `deletedField`. `data` / `custom` are opaque bodies (plaintext JSON, or an EDV
- * envelope on an encrypted collection), so they are typed as free-form objects.
- * `createdBy` is the server-managed creator DID carried down from the `changes`
- * feed. `epoch` is the opaque key-epoch id the resource's envelope was encrypted
- * under (absent = pre-epoch, encrypted directly to the vault key), also carried
- * down the feed. `etag` / `metaEtag` are the opaque `ETag` validators the
- * server last reported for the content and `/meta` sub-resources -- echoed
- * back verbatim as a later conditional write's `ifMatch`, since they can no
- * longer be rebuilt from `version` / `metaVersion` alone.
+ * One shape (`{ id, updatedAt, updatedAtCounter?, originId?, meta?, createdBy?,
+ * epoch?, etag?, metaEtag?, data?, custom? }`) carries both a content record
+ * and an independently-stamped metadata sub-resource; `_deleted` is added by
+ * RxDB via `deletedField`. `updatedAt`, `updatedAtCounter`, and `originId` are
+ * the content record's write stamp as the server minted it; `updatedAt` alone
+ * is required, since a fresh local row needs a wall-clock value for the index
+ * before the server has stamped it, and the server's value replaces it on the
+ * echo. `meta` is the `/meta` record's own stamp with its generation, stored
+ * nested as the wire shapes it (decision 0002), absent until metadata has been
+ * written and complete once present. `data` / `custom` are opaque bodies
+ * (plaintext JSON, or an EDV envelope on an encrypted collection), so they are
+ * typed as free-form objects. `createdBy` is the server-managed creator DID
+ * carried down from the `changes` feed. `epoch` is the opaque key-epoch id the
+ * resource's envelope was encrypted under (absent = pre-epoch, encrypted
+ * directly to the vault key), also carried down the feed. `etag` / `metaEtag`
+ * are the opaque `ETag` validators the server last reported for the content and
+ * `/meta` sub-resources -- echoed back verbatim as a later conditional write's
+ * `ifMatch`.
+ *
+ * The schema is documentation unless a consumer registers a validator: this
+ * package registers none, its tests run on bare memory storage, and the bounds
+ * below (`maxLength`, `minimum`) describe the server's mint rather than being
+ * enforced here. A server that minted a longer `originId` or `generation`
+ * would need a matching schema edit that no test here catches.
  *
  * The return type is declared structurally rather than as RxDB's
  * `RxJsonSchema<SyncedDoc>`, so this module (and the root entry that exports it)
@@ -57,8 +69,23 @@ export function syncedDocSchema(): SyncedDocSchema {
     properties: {
       id: { type: 'string', maxLength: 256 },
       updatedAt: { type: 'string', maxLength: 64 },
-      version: { type: 'number' },
-      metaVersion: { type: 'number' },
+      // The server-minted rest of the content write stamp: a safe non-negative
+      // integer counter and the origin id (`[A-Za-z0-9_-]{1,64}` on the
+      // server). Absent until the server has stamped the row.
+      updatedAtCounter: { type: 'integer', minimum: 0 },
+      originId: { type: 'string', maxLength: 64 },
+      // The `/meta` record's own stamp and generation, nested as on the wire.
+      // All four members are required: `meta` is absent or complete.
+      meta: {
+        type: 'object',
+        properties: {
+          updatedAt: { type: 'string', maxLength: 64 },
+          updatedAtCounter: { type: 'integer', minimum: 0 },
+          originId: { type: 'string', maxLength: 64 },
+          generation: { type: 'string', maxLength: 64 }
+        },
+        required: ['updatedAt', 'updatedAtCounter', 'originId', 'generation']
+      },
       // The server-managed creator DID (a `did:key`), absent when unrecorded.
       createdBy: { type: 'string', maxLength: 256 },
       // The opaque key-epoch id the envelope was encrypted under, absent when
@@ -73,7 +100,7 @@ export function syncedDocSchema(): SyncedDocSchema {
       data: { type: 'object', additionalProperties: true },
       custom: { type: 'object', additionalProperties: true }
     },
-    required: ['id', 'updatedAt', 'version'],
+    required: ['id', 'updatedAt'],
     indexes: ['updatedAt']
   }
 }

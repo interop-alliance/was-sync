@@ -30,8 +30,17 @@ import {
 } from '@interop/was-client/sync'
 import { createWasReplication } from '../../src/wasReplication.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
-import { lwwResolver, makeConflictHandler } from '../../src/conflictHandler.js'
-import type { Json, WasSyncPort } from '../../src/types.js'
+import {
+  lwwResolver,
+  makeConflictHandler,
+  type ConflictInput
+} from '../../src/conflictHandler.js'
+import type {
+  Json,
+  SyncedDoc,
+  WasSyncPort,
+  WithDeleted
+} from '../../src/types.js'
 
 // A fixed 32-byte seed so the controller DID, and therefore the Space id, is
 // stable across runs; the data directory is fresh each run regardless.
@@ -99,12 +108,13 @@ async function openServerCollection(): Promise<{
  * Opens a fresh memory-storage collection on the synced-document schema. With
  * `lww` set, the package's last-write-wins conflict handler is installed over
  * plaintext bodies. Otherwise the remote state wins, as under RxDB's default.
- * `onConflict` is called once per conflict RxDB hands the handler.
+ * `onConflict` is called once per conflict RxDB hands the handler, with the
+ * conflict input.
  */
 async function openCollection({
   lww = false,
   onConflict
-}: { lww?: boolean; onConflict?: () => void } = {}) {
+}: { lww?: boolean; onConflict?: (input: ConflictInput) => void } = {}) {
   db = await createRxDatabase({
     name: `synctest-${randomUUID()}`,
     storage: getRxStorageMemory(),
@@ -117,7 +127,7 @@ async function openCollection({
       ...((lww || onConflict !== undefined) && {
         conflictHandler: makeConflictHandler({
           resolve: async input => {
-            onConflict?.()
+            onConflict?.(input)
             return lww ? resolveLww(input) : 'remote'
           }
         })
@@ -219,11 +229,64 @@ function recordPreconditionsOn(port: WasSyncPort): {
 /**
  * Whether the observer's read shows a fully committed record. The server writes
  * a resource's content file before its metadata sidecar, and a read that lands
- * between the two returns the content with no `etag`, `version`, or
+ * between the two returns the content with no `etag`, write stamp, or
  * `createdBy`; waiting for the `etag` rules that torn read out.
  */
 function committed(record: { etag?: string } | null): boolean {
   return record?.etag !== undefined
+}
+
+/**
+ * Whether a local row holds the server's content write stamp as the observer
+ * reads it. The ack carries a validator alone, so the feed echo is the only
+ * source of `updatedAtCounter` and `originId`: a row whose pair is defined and
+ * equal to the primary's has had an echo land. The top-level `updatedAt` is
+ * compared too. The server's value replaces the app's on the echo, and the
+ * server reuses one origin and often counter `0`, so the pair alone cannot
+ * tell the echo of an edit from the state the row held before it.
+ */
+function holdsServerStamp(
+  local: Pick<SyncedDoc, 'updatedAt' | 'updatedAtCounter' | 'originId'> | null,
+  primary: Pick<SyncedDoc, 'updatedAt' | 'updatedAtCounter' | 'originId'> | null
+): boolean {
+  return (
+    local !== null &&
+    primary !== null &&
+    local.updatedAtCounter !== undefined &&
+    local.originId !== undefined &&
+    local.updatedAtCounter === primary.updatedAtCounter &&
+    local.originId === primary.originId &&
+    local.updatedAt === primary.updatedAt
+  )
+}
+
+/**
+ * The current local row of `id` as a plain object, or `null` when the row is
+ * absent or deleted.
+ */
+async function localRow(
+  collection: Awaited<ReturnType<typeof openCollection>>,
+  id: string
+): Promise<WithDeleted<SyncedDoc> | null> {
+  const doc = await collection.findOne(id).exec()
+  return doc === null ? null : (doc.toJSON() as WithDeleted<SyncedDoc>)
+}
+
+/**
+ * A nudge that pulls only once every pending push has settled. RxDB drops a
+ * pulled state while a local write is pending on the row and still moves the
+ * checkpoint on, and the ack write-back is such a write until the push cycle
+ * it triggers has run (WS-17). A barrier that waits on the echo would then
+ * wait for a feed change that never comes.
+ */
+function settledReSync(replication: {
+  awaitInSync(): Promise<boolean>
+  reSync(): void
+}): () => Promise<void> {
+  return async () => {
+    await replication.awaitInSync()
+    replication.reSync()
+  }
 }
 
 /**
@@ -232,13 +295,13 @@ function committed(record: { etag?: string } | null): boolean {
  */
 async function eventually(
   predicate: () => boolean | Promise<boolean>,
-  nudge?: () => void
+  nudge?: () => void | Promise<void>
 ): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt++) {
     if (await predicate()) {
       return
     }
-    nudge?.()
+    await nudge?.()
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error('Condition not met within timeout.')
@@ -258,14 +321,14 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-1',
       updatedAt: '000000000001',
-      version: 0,
       data: { hello: 'world' }
     })
 
     await eventually(async () => committed(await observer.get({ id: 'cid-1' })))
     const primary = await observer.get({ id: 'cid-1' })
     expect(primary?.data).toEqual({ hello: 'world' })
-    expect(primary?.version).toBeGreaterThanOrEqual(1)
+    expect(primary?.updatedAtCounter).toBeTypeOf('number')
+    expect(primary?.originId).toBeTypeOf('string')
 
     await replication.cancel()
   })
@@ -301,7 +364,6 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-epoch',
       updatedAt: '000000000001',
-      version: 0,
       epoch: 'epoch-1',
       data: { hello: 'world' }
     })
@@ -366,21 +428,15 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-del',
       updatedAt: '000000000001',
-      version: 0,
       data: { x: 1 }
     })
-    // Wait for the create to fully round-trip: pushed to the server AND the
-    // server `version` echoed back locally, so the delete's `If-Match` is not
+    // Wait for the create's ack write-back: pushed to the server AND the acked
+    // `etag` written into the local row, so the delete's `If-Match` is not
     // stale (the create-then-immediate-delete race of tension 1).
     await eventually(
-      async () => {
-        const current = await collection.findOne('cid-del').exec()
-        return (
-          committed(await observer.get({ id: 'cid-del' })) &&
-          (current?.toJSON().version ?? 0) >= 1
-        )
-      },
-      () => replication.reSync()
+      async () =>
+        committed(await observer.get({ id: 'cid-del' })) &&
+        (await localRow(collection, 'cid-del'))?.etag !== undefined
     )
 
     const doc = await collection.findOne('cid-del').exec()
@@ -417,7 +473,6 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replicaA.insert({
       id: 'cid-shared',
       updatedAt: '000000000001',
-      version: 0,
       data: { x: 1 }
     })
     await eventually(
@@ -444,14 +499,12 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replicaB.insert({
       id: 'cid-shared',
       updatedAt: '000000000001',
-      version: 0,
       data: { x: 1 }
     })
     await (await replicaB.findOne('cid-shared').exec())!.remove()
     await replicaB.insert({
       id: 'cid-sibling',
       updatedAt: '000000000002',
-      version: 0,
       data: { x: 2 }
     })
 
@@ -467,7 +520,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
 
     expect(deletes).toEqual([])
     expect(errors).toEqual([])
-    // A's copy is intact, under the revision A's create earned.
+    // A's copy is intact, under the validator and stamp A's create earned.
     expect(await observer.get({ id: 'cid-shared' })).toEqual(live)
     expect((await observer.get({ id: 'cid-sibling' }))?.data).toEqual({ x: 2 })
     // B holds its local tombstone: the pull that paged past the live r found
@@ -560,7 +613,6 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-author',
       updatedAt: '000000000001',
-      version: 0,
       data: { hello: 'world' }
     })
     await eventually(async () =>
@@ -572,20 +624,231 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
 
     // The echo of that write comes back down the feed carrying what the
     // server alone assigns, and lands in the local row: by then the ack
-    // write-back has stamped `version` / `etag`, so only `createdBy` and the
-    // server's `updatedAt` are left to differ, and the default `isEqual` has
-    // to see them. No pull is nudged until the pushes have settled
-    // (`awaitInSync`): RxDB defers a pulled state behind a pending local
-    // write while its checkpoint moves on, and the ack write-back is such a
-    // write until the push cycle it triggers has run (WS-17).
+    // write-back has stamped `etag`, so only `createdBy` and the server's
+    // write stamp are left to differ, and the default `isEqual` has to see
+    // them. No pull is nudged until the pushes have settled (`awaitInSync`):
+    // RxDB defers a pulled state behind a pending local write while its
+    // checkpoint moves on, and the ack write-back is such a write until the
+    // push cycle it triggers has run (WS-17).
     await replication.awaitInSync()
     replication.reSync()
     await replication.awaitInSync()
     const local = (await collection.findOne('cid-author').exec())?.toJSON()
     expect(local?.createdBy).toBe(controllerDid)
     expect(local?.updatedAt).toBe(primary?.updatedAt)
-    expect(local?.version).toBe(primary?.version)
+    expect(local?.updatedAtCounter).toBe(primary?.updatedAtCounter)
+    expect(local?.originId).toBe(primary?.originId)
     expect(local?.etag).toBe(primary?.etag)
+
+    await replication.cancel()
+  })
+
+  it("lands the server's write stamp on a created row from its echo, with no meta until a /meta write", async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-stamp-create'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-stamp',
+      updatedAt: '000000000001',
+      data: { hello: 'world' }
+    })
+    // A fresh local row carries no server stamp.
+    const fresh = await localRow(collection, 'cid-stamp')
+    expect('updatedAtCounter' in fresh!).toBe(false)
+    expect('originId' in fresh!).toBe(false)
+
+    await eventually(async () =>
+      committed(await observer.get({ id: 'cid-stamp' }))
+    )
+    // The ack writes back the validator alone, so the stamp is still absent
+    // once the write-back has landed.
+    await eventually(
+      async () => (await localRow(collection, 'cid-stamp'))?.etag !== undefined
+    )
+    await replication.awaitInSync()
+    const acked = await localRow(collection, 'cid-stamp')
+    expect('updatedAtCounter' in acked!).toBe(false)
+    expect('originId' in acked!).toBe(false)
+
+    // The echo brings the stamp down.
+    await eventually(
+      async () =>
+        holdsServerStamp(
+          await localRow(collection, 'cid-stamp'),
+          await observer.get({ id: 'cid-stamp' })
+        ),
+      settledReSync(replication)
+    )
+    const primary = await observer.get({ id: 'cid-stamp' })
+    const local = await localRow(collection, 'cid-stamp')
+    expect(local!.updatedAtCounter).toBeTypeOf('number')
+    expect(local!.originId).toBeTypeOf('string')
+    expect(local!.updatedAtCounter).toBe(primary!.updatedAtCounter)
+    expect(local!.originId).toBe(primary!.originId)
+    expect(local!.updatedAt).toBe(primary!.updatedAt)
+    // No metadata was written, so neither the server nor the echo carries a
+    // `/meta` stamp.
+    expect('meta' in primary!).toBe(false)
+    expect('meta' in local!).toBe(false)
+
+    await replication.cancel()
+  })
+
+  it('lands the nested meta stamp from a /meta write, leaving the top-level updatedAt at the content stamp', async () => {
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-stamp-meta'
+    })
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-stamp-meta',
+      updatedAt: '000000000001',
+      data: { hello: 'world' }
+    })
+    await eventually(
+      async () =>
+        holdsServerStamp(
+          await localRow(collection, 'cid-stamp-meta'),
+          await observer.get({ id: 'cid-stamp-meta' })
+        ),
+      settledReSync(replication)
+    )
+    const content = await observer.get({ id: 'cid-stamp-meta' })
+    expect('meta' in content!).toBe(false)
+
+    // A metadata-only edit, with the app's own bumped `updatedAt`.
+    const row = await collection.findOne('cid-stamp-meta').exec()
+    await row!.incrementalPatch({
+      custom: { name: 'Starred', tags: { starred: 'yes' } },
+      updatedAt: '000000000002'
+    })
+    await eventually(
+      async () =>
+        (await observer.get({ id: 'cid-stamp-meta' }))?.meta !== undefined
+    )
+    const primary = await observer.get({ id: 'cid-stamp-meta' })
+    await eventually(async () => {
+      const local = await localRow(collection, 'cid-stamp-meta')
+      return (
+        holdsServerStamp(local, primary) &&
+        JSON.stringify(local?.meta) === JSON.stringify(primary?.meta)
+      )
+    }, settledReSync(replication))
+    const local = await localRow(collection, 'cid-stamp-meta')
+
+    // The nested stamp lands whole, as the server reports it.
+    expect(Object.keys(local!.meta!).sort()).toEqual([
+      'generation',
+      'originId',
+      'updatedAt',
+      'updatedAtCounter'
+    ])
+    expect(local!.meta).toEqual(primary!.meta)
+    expect(local!.metaEtag).toBe(primary!.metaEtag)
+    expect(local!.custom).toEqual({ name: 'Starred', tags: { starred: 'yes' } })
+
+    // The `/meta` write touched no content: the server keeps the content
+    // stamp and validator, and the echo replaces the app's bumped `updatedAt`
+    // with the content stamp's.
+    expect(primary!.updatedAt).toBe(content!.updatedAt)
+    expect(primary!.updatedAtCounter).toBe(content!.updatedAtCounter)
+    expect(primary!.originId).toBe(content!.originId)
+    expect(primary!.etag).toBe(content!.etag)
+    const echoed = (await observer.query({ limit: 100 })).documents.find(
+      doc => doc.id === 'cid-stamp-meta'
+    )
+    expect(echoed?.updatedAt).toBe(content!.updatedAt)
+    expect(echoed?.meta).toEqual(primary!.meta)
+    expect(local!.updatedAt).toBe(content!.updatedAt)
+    expect(local!.updatedAtCounter).toBe(content!.updatedAtCounter)
+    expect(local!.originId).toBe(content!.originId)
+
+    await replication.cancel()
+  })
+
+  it('pushes a custom edit made after the /meta ack and before its echo with If-Match, and no 412', async () => {
+    // A `/meta` ack brings `metaEtag` and no `meta`, so between this
+    // replica's own `/meta` write and its echo the row holds the validator
+    // alone. The next metadata edit must route as an update on that
+    // validator, not as a create the server would refuse.
+    let conflicts = 0
+    const collection = await openCollection({
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { metaWrites } = recordPreconditionsOn(port)
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-meta-pre-echo'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-pre-echo',
+      updatedAt: '000000000001',
+      data: { hello: 'world' }
+    })
+    await eventually(
+      async () =>
+        holdsServerStamp(
+          await localRow(collection, 'cid-pre-echo'),
+          await observer.get({ id: 'cid-pre-echo' })
+        ),
+      settledReSync(replication)
+    )
+    const stamped = await localRow(collection, 'cid-pre-echo')
+    expect('meta' in stamped!).toBe(false)
+    expect('metaEtag' in stamped!).toBe(false)
+
+    // The first `/meta` write. No pull is nudged from here on, so its echo
+    // stays on the server.
+    await (await collection.findOne('cid-pre-echo').exec())!.incrementalPatch({
+      custom: { name: 'First', tags: {} },
+      updatedAt: '000000000002'
+    })
+    await eventually(
+      async () =>
+        (await localRow(collection, 'cid-pre-echo'))?.metaEtag !== undefined
+    )
+    // Let the push cycle the write-back triggers settle, so RxDB records the
+    // acked row as the assumed primary.
+    await replication.awaitInSync()
+    const acked = await localRow(collection, 'cid-pre-echo')
+    expect('meta' in acked!).toBe(false)
+    expect(acked!.metaEtag).toBe(
+      (await observer.get({ id: 'cid-pre-echo' }))?.metaEtag
+    )
+
+    await (await collection.findOne('cid-pre-echo').exec())!.incrementalPatch({
+      custom: { name: 'Second', tags: {} },
+      updatedAt: '000000000003'
+    })
+    await eventually(
+      async () =>
+        JSON.stringify((await observer.get({ id: 'cid-pre-echo' }))?.custom) ===
+        JSON.stringify({ name: 'Second', tags: {} })
+    )
+    await replication.awaitInSync()
+
+    expect(metaWrites).toEqual([
+      { ifNoneMatch: true },
+      { ifMatch: acked!.metaEtag }
+    ])
+    expect(conflicts).toBe(0)
+    expect(errors).toEqual([])
 
     await replication.cancel()
   })
@@ -603,7 +866,6 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-meta',
       updatedAt: '000000000001',
-      version: 0,
       data: { hello: 'world' },
       // A plaintext collection's `custom` is the `{ name, tags }` shape, with
       // `tags` a string-to-string record.
@@ -674,19 +936,20 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await eventually(
       async () =>
         stepOf((await observer.get({ id: 'cid-race' }))?.data) === 'local-2',
-      () => replication.reSync()
+      settledReSync(replication)
     )
+    // The echo of the re-push lands, so nothing is left to push.
     await eventually(
-      async () => {
-        const current = await collection.findOne('cid-race').exec()
-        const primary = await observer.get({ id: 'cid-race' })
-        return current?.toJSON().version === primary?.version
-      },
-      () => replication.reSync()
+      async () =>
+        holdsServerStamp(
+          await localRow(collection, 'cid-race'),
+          await observer.get({ id: 'cid-race' })
+        ),
+      settledReSync(replication)
     )
 
     // The stale write was refused once, and the re-push carried the
-    // validator of the revision that refused it.
+    // validator the other writer's write earned.
     expect(contentWrites).toEqual([
       { ifMatch: created.etag },
       { ifMatch: bumped.etag }
@@ -722,7 +985,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     const pulled = await collection.findOne('cid-race-remote').exec()
     expect(stepOf(pulled?.toJSON().data)).toBe('server-1')
 
-    // This time the other writer's revision carries the later payload.
+    // This time the other writer's write carries the later payload.
     const bumped = await observer.putContent({
       id: 'cid-race-remote',
       data: {
@@ -741,7 +1004,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       updatedAt: '000000000002'
     })
 
-    // The local edit loses: the replica takes the server's revision.
+    // The local edit loses: the replica takes the server's state.
     await eventually(
       async () => {
         const current = await collection.findOne('cid-race-remote').exec()
@@ -753,12 +1016,95 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       () => replication.reSync()
     )
 
-    // One refused write and no re-push; the server still holds its revision.
+    // One refused write and no re-push; the server still holds its state.
     expect(contentWrites).toEqual([{ ifMatch: created.etag }])
     expect(conflicts).toBe(1)
     const primary = await observer.get({ id: 'cid-race-remote' })
     expect(stepOf(primary?.data)).toBe('server-2')
     expect(primary?.etag).toBe(bumped.etag)
+
+    await replication.cancel()
+  })
+
+  it('resolves a validator-only 412 to the local edit and re-pushes it against the fresh etag', async () => {
+    // Another writer re-writes the body this replica last synced, unchanged,
+    // so the server's `etag` and stamp move while its content does not. The
+    // local edit's `If-Match` is then stale, but the conflict is about the
+    // validator alone: rule 1 keeps the local edit. Its payload is older than
+    // the server's, so payload last-write-wins alone would have kept the
+    // server's body, and the local edit landing proves rule 1 decided.
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { contentWrites } = recordPreconditionsOn(port)
+    const body = {
+      step: 'server-1',
+      updatedAt: '2026-01-01T00:00:05Z',
+      writerId: 'b'
+    }
+    const created = await observer.putContent({
+      id: 'cid-validator',
+      data: body
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-412-validator'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    const pulled = await collection.findOne('cid-validator').exec()
+    expect(pulled?.toJSON().etag).toBe(created.etag)
+
+    const rewritten = await observer.putContent({
+      id: 'cid-validator',
+      data: body,
+      ifMatch: created.etag
+    })
+    expect(rewritten.etag).toBeDefined()
+    expect(rewritten.etag).not.toBe(created.etag)
+    await pulled!.incrementalPatch({
+      data: {
+        step: 'local-2',
+        updatedAt: '2026-01-01T00:00:02Z',
+        writerId: 'a'
+      },
+      updatedAt: '000000000002'
+    })
+
+    await eventually(
+      async () =>
+        stepOf((await observer.get({ id: 'cid-validator' }))?.data) ===
+        'local-2',
+      settledReSync(replication)
+    )
+    await eventually(
+      async () =>
+        holdsServerStamp(
+          await localRow(collection, 'cid-validator'),
+          await observer.get({ id: 'cid-validator' })
+        ),
+      settledReSync(replication)
+    )
+
+    // One refused write on the pulled validator, then one re-push on the
+    // validator the re-write earned.
+    expect(contentWrites).toEqual([
+      { ifMatch: created.etag },
+      { ifMatch: rewritten.etag }
+    ])
+    expect(conflicts).toBe(1)
+    expect(errors).toEqual([])
+    const local = await localRow(collection, 'cid-validator')
+    expect(stepOf(local?.data)).toBe('local-2')
+    expect(local?.etag).toBe(
+      (await observer.get({ id: 'cid-validator' }))?.etag
+    )
 
     await replication.cancel()
   })
@@ -919,6 +1265,77 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
+  it('resurrects a row over a feed tombstone, sending the /meta half as If-None-Match: *', async () => {
+    // Another writer deletes a row carrying metadata and the tombstone rides
+    // the feed down, so the replica's assumed primary is that tombstone. A
+    // re-insert of the id is then a create on both halves: a tombstone holds
+    // no live `/meta` record to condition on.
+    let conflicts = 0
+    const collection = await openCollection({
+      lww: true,
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { contentWrites, metaWrites } = recordPreconditionsOn(port)
+    const created = await observer.putContent({
+      id: 'cid-feed-tomb',
+      data: { step: 'server-1' }
+    })
+    await observer.putMeta({
+      id: 'cid-feed-tomb',
+      custom: { name: 'Before', tags: {} },
+      ifNoneMatch: true
+    })
+
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-feed-tombstone'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+    const pulled = await localRow(collection, 'cid-feed-tomb')
+    expect(pulled?.meta).toBeDefined()
+    expect(pulled?.metaEtag).toBeDefined()
+
+    await observer.deleteContent({ id: 'cid-feed-tomb', ifMatch: created.etag })
+    await eventually(
+      async () => (await collection.findOne('cid-feed-tomb').exec()) === null,
+      settledReSync(replication)
+    )
+    // The server's tombstone carries no `/meta` stamp or validator.
+    const tombstone = (await observer.query({ limit: 100 })).documents.find(
+      doc => doc.id === 'cid-feed-tomb'
+    )
+    expect(tombstone?._deleted).toBe(true)
+    expect('meta' in tombstone!).toBe(false)
+    expect('metaEtag' in tombstone!).toBe(false)
+
+    await collection.insert({
+      id: 'cid-feed-tomb',
+      updatedAt: '000000000003',
+      data: { step: 'local-2' },
+      custom: { name: 'After', tags: { starred: 'yes' } }
+    })
+    await eventually(async () => {
+      const primary = await observer.get({ id: 'cid-feed-tomb' })
+      return (
+        stepOf(primary?.data) === 'local-2' &&
+        JSON.stringify(primary?.custom) ===
+          JSON.stringify({ name: 'After', tags: { starred: 'yes' } })
+      )
+    })
+    await replication.awaitInSync()
+
+    expect(contentWrites).toEqual([{ ifNoneMatch: true }])
+    expect(metaWrites).toEqual([{ ifNoneMatch: true }])
+    expect(conflicts).toBe(0)
+    expect(errors).toEqual([])
+
+    await replication.cancel()
+  })
+
   it('recovers a metadata-only edit against a resource another replica deleted (default port)', async () => {
     // Replica B deletes X; this replica, offline, edits only X's metadata. On
     // reconnect no content write runs (the body is unchanged), so the `/meta`
@@ -1001,7 +1418,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     // Replica A pushes a row under its own label, then another writer deletes
     // and re-creates the same id with the same body. A's delete carries A's
     // last-known validator and 412s; the re-read body is equal, so only the
-    // writer label says this is not A's own revision drift. Remote wins, so A
+    // writer label says this is not A's own validator drift. Remote wins, so A
     // ends up holding the re-created row and the server's copy stays live.
     let conflicts = 0
     const collection = await openCollection({
@@ -1020,16 +1437,17 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await collection.insert({
       id: 'cid-recreated',
       updatedAt: '000000000001',
-      version: 0,
       data: { fixed: true }
     })
     await eventually(
       async () =>
         committed(await observer.get({ id: 'cid-recreated' })) &&
         (await collection.findOne('cid-recreated').exec())?.get('etag') !==
-          undefined,
-      () => replication.reSync()
+          undefined
     )
+    // The write-back's own push cycle settles, so RxDB holds the acked row as
+    // the assumed primary and the delete conditions on its `etag`.
+    await replication.awaitInSync()
 
     const own = await observer.get({ id: 'cid-recreated' })
     await observer.deleteContent({
@@ -1043,15 +1461,17 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       ifNoneMatch: true,
       writerId: 'writer-b'
     })
-    expect(recreated.version!).toBeGreaterThan(own!.version!)
+    // No integer orders the two records; the validators tell them apart.
+    expect(recreated.etag).toBeDefined()
+    expect(recreated.etag).not.toBe(own!.etag)
 
     await (await collection.findOne('cid-recreated').exec())!.remove()
     // The delete is refused and resolved rather than re-issued: the local row
-    // comes back live on the re-created revision.
+    // comes back live on the re-created record.
     await eventually(
       async () => {
         const current = await collection.findOne('cid-recreated').exec()
-        return current !== null && current.get('version') === recreated.version
+        return current !== null && current.get('etag') === recreated.etag
       },
       () => replication.reSync()
     )
@@ -1062,23 +1482,31 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     expect(conflicts).toBe(1)
     const primary = await observer.get({ id: 'cid-recreated' })
     expect(primary).not.toBeNull()
-    expect(primary!.version).toBe(recreated.version)
+    expect(primary!.etag).toBe(recreated.etag)
     expect(primary!.writerId).toBe('writer-b')
+    // The conflict entry carried the re-created record's stamp into the row.
+    const local = await localRow(collection, 'cid-recreated')
+    expect(local!.updatedAtCounter).toBe(primary!.updatedAtCounter)
+    expect(local!.originId).toBe(primary!.originId)
+    expect(local!.updatedAt).toBe(primary!.updatedAt)
 
     await replication.cancel()
   })
 
-  it('edits twice with no 412 over a port whose validators carry no revision', async () => {
-    // A spec-conformant server may send an `ETag` with no parseable revision,
-    // so the port acks and reads back an `etag` with no `version`. The driver
-    // must then run on the validator alone: each ack's `etag` is written back
-    // and echoed as the next write's `If-Match`. The wrapper below hides every
-    // revision the real port parsed, leaving the validators as they are, and
-    // withholds the feed, so the validator can reach the row only through the
-    // ack write-back and not through the echo.
+  it('runs on the validator alone over a port that hides the write stamp', async () => {
+    // A primary read may come back with no write stamp and no `meta` (a
+    // deployment that hides them, or a `/meta` read that is not whole), so
+    // the driver must route every write on the `etag` alone. The wrapper
+    // below strips `updatedAtCounter`, `originId`, and `meta` off every
+    // primary read and withholds the feed, so the row can learn state only
+    // from an ack write-back or a conflict entry, and never a stamp. Two
+    // edits then go out with no 412, and a write raced by another writer
+    // resolves on a conflict entry that carries no stamp, whose `etag` the
+    // next write still conditions on.
     const { port: real, observer } = await openServerCollection()
     let conflicts = 0
-    const opaque: WasSyncPort = {
+    const contentWrites: Array<{ ifMatch?: string; ifNoneMatch?: boolean }> = []
+    const hiddenStamp: WasSyncPort = {
       async query() {
         return { documents: [], checkpoint: null }
       },
@@ -1087,13 +1515,23 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
         if (primary === null) {
           return null
         }
-        const { version: _v, metaVersion: _m, ...rest } = primary
+        const {
+          updatedAtCounter: _counter,
+          originId: _origin,
+          meta: _meta,
+          ...rest
+        } = primary
         return rest
       },
       async putContent(options) {
+        contentWrites.push({
+          ...(options.ifMatch !== undefined && { ifMatch: options.ifMatch }),
+          ...(options.ifNoneMatch !== undefined && {
+            ifNoneMatch: options.ifNoneMatch
+          })
+        })
         try {
-          const { etag } = await real.putContent(options)
-          return etag !== undefined ? { etag } : {}
+          return await real.putContent(options)
         } catch (err) {
           if (isSyncConflictError(err)) {
             conflicts += 1
@@ -1102,40 +1540,41 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
         }
       },
       async putMeta(options) {
-        const acked = await real.putMeta(options)
-        if (acked === undefined) {
-          return undefined
-        }
-        return acked.etag !== undefined ? { etag: acked.etag } : {}
+        return real.putMeta(options)
       },
       async deleteContent(options) {
-        const acked = await real.deleteContent(options)
-        if (acked === undefined) {
-          return undefined
-        }
-        return acked.etag !== undefined ? { etag: acked.etag } : {}
+        return real.deleteContent(options)
       }
     }
-    const collection = await openCollection()
+    const conflictInputs: ConflictInput[] = []
+    const collection = await openCollection({
+      onConflict: input => conflictInputs.push(input)
+    })
     const replication = createWasReplication({
       rxCollection: collection,
-      wasPort: opaque,
-      replicationIdentifier: 'test-opaque-etag'
+      wasPort: hiddenStamp,
+      replicationIdentifier: 'test-hidden-stamp'
     })
     await replication.awaitInitialReplication()
 
     await collection.insert({
       id: 'cid-opaque',
       updatedAt: '000000000001',
-      version: 0,
       data: { step: 'local-1' }
     })
-    await eventually(
-      async () => committed(await observer.get({ id: 'cid-opaque' })),
-      () => replication.reSync()
+    await eventually(async () =>
+      committed(await observer.get({ id: 'cid-opaque' }))
     )
 
     for (const step of ['local-2', 'local-3']) {
+      // The acked validator reaches the row with no feed to carry it, and
+      // its push cycle settles before the next edit.
+      await eventually(async () => {
+        const primary = await observer.get({ id: 'cid-opaque' })
+        const current = await localRow(collection, 'cid-opaque')
+        return current?.etag === primary?.etag
+      })
+      await replication.awaitInSync()
       const row = await collection.findOne('cid-opaque').exec()
       await row!.incrementalPatch({
         data: { step },
@@ -1143,25 +1582,69 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       })
       await eventually(
         async () =>
-          stepOf((await observer.get({ id: 'cid-opaque' }))?.data) === step,
-        () => replication.reSync()
+          stepOf((await observer.get({ id: 'cid-opaque' }))?.data) === step
       )
-      // The acked validator reaches the row with no feed to carry it.
-      await eventually(async () => {
-        const primary = await observer.get({ id: 'cid-opaque' })
-        const current = await collection.findOne('cid-opaque').exec()
-        return current?.get('etag') === primary?.etag
-      })
     }
-
     expect(conflicts).toBe(0)
+    await eventually(async () => {
+      const primary = await observer.get({ id: 'cid-opaque' })
+      const current = await localRow(collection, 'cid-opaque')
+      return current?.etag === primary?.etag
+    })
+    await replication.awaitInSync()
+
+    // Another writer moves the resource behind the replica's back, so the
+    // next local edit is refused and its conflict entry comes off the
+    // stamp-hiding read. The remote state wins.
+    const beforeBump = (await observer.get({ id: 'cid-opaque' }))!.etag
+    const bumped = await observer.putContent({
+      id: 'cid-opaque',
+      data: { step: 'server-4' },
+      ifMatch: beforeBump
+    })
+    await (await collection.findOne('cid-opaque').exec())!.incrementalPatch({
+      data: { step: 'local-5' },
+      updatedAt: '000000000005'
+    })
+    await eventually(async () => {
+      const current = await localRow(collection, 'cid-opaque')
+      return (
+        stepOf(current?.data) === 'server-4' && current?.etag === bumped.etag
+      )
+    })
+    expect(conflicts).toBe(1)
+    expect(conflictInputs).toHaveLength(1)
+    const { realMasterState } = conflictInputs[0]!
+    expect(realMasterState.etag).toBe(bumped.etag)
+    expect('updatedAtCounter' in realMasterState).toBe(false)
+    expect('originId' in realMasterState).toBe(false)
+    expect('meta' in realMasterState).toBe(false)
+    const resolved = await localRow(collection, 'cid-opaque')
+    expect('updatedAtCounter' in resolved!).toBe(false)
+    expect('originId' in resolved!).toBe(false)
+    await replication.awaitInSync()
+
+    // The next edit conditions on the conflict entry's `etag` and lands.
+    await (await collection.findOne('cid-opaque').exec())!.incrementalPatch({
+      data: { step: 'local-6' },
+      updatedAt: '000000000006'
+    })
+    await eventually(
+      async () =>
+        stepOf((await observer.get({ id: 'cid-opaque' }))?.data) === 'local-6'
+    )
+    expect(contentWrites.slice(-2)).toEqual([
+      { ifMatch: beforeBump },
+      { ifMatch: bumped.etag }
+    ])
+    expect(conflicts).toBe(1)
 
     await replication.cancel()
   })
 
   it('declares the injected writerId on every push, and a fresh replica under the same label pulls the mixed feed', async () => {
     const { port, observer } = await openServerCollection()
-    // A foreign-labeled revision, an unlabeled one, and a tombstone, all
+    // A foreign-labeled write, an unlabeled one, and a tombstone, all
     // written by another writer.
     await observer.putContent({
       id: 'cid-foreign',
@@ -1208,14 +1691,12 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replicaA.insert({
       id: 'cid-own',
       updatedAt: '000000000001',
-      version: 0,
       data: { from: 'own' },
       custom: { name: 'mine' }
     })
     await replicaA.insert({
       id: 'cid-own-gone',
       updatedAt: '000000000001',
-      version: 0,
       data: { from: 'own-doomed' }
     })
     // No pull is nudged while A's pushes are in flight: RxDB defers a pulled
@@ -1257,7 +1738,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       expect(write.writerId).toBe('writer-a')
     }
 
-    // A fresh replica under A's label (which holds none of those revisions)
+    // A fresh replica under A's label (which holds none of those writes)
     // pulls the same feed.
     const withLabel = await pullFreshReplica({
       replicationIdentifier: 'test-writer-writer-a',

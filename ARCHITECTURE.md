@@ -22,8 +22,8 @@ Three entries, and the split between them is part of the contract.
 src/index.ts             The "." door: RxDB-free, in the module graph AND in
                          the emitted declarations
 src/types.ts             The wire and replica shapes, the port interfaces, the
-                         opaque-body equality, the optional-field copy, the LWW
-                         stamp accessor
+                         opaque-body equality, the optional-field copy, the
+                         accessor for the payload's LWW fields
 src/syncedDocSchema.ts   The one replica schema, returned as a structural type
 src/conflictHandler.ts   The RxDB conflict-handler seam (injected decision) and
                          its last-write-wins default resolver
@@ -69,82 +69,94 @@ numbered so items and reviews can cite them.
 2. **The driver mints no ids.** Row ids are the caller's, content-addressed and
    identical on every replica; a resolved row keeps the `createdBy` the server
    recorded. Two replicas therefore converge on the same rows without
-   coordinating.
-3. **Every content push carries the row's `Key-Epoch` stamp.** The stamp rides
-   `SyncedDoc.epoch` from the feed and back out through `putContent`; the header
-   itself belongs to was-client's port. The driver runs no unknown-epoch refresh
-   of its own, since it holds no cipher to rebuild (invariant 1). The rule is
-   `@interop/was-client/edv`'s, and it reaches the driver through the one seam
-   that decrypts anything, the default resolver's `decrypt` closure: a consumer
-   hands in a refreshing cipher's decrypt (`createRefreshingEdvDocCipher`),
-   which re-reads the descriptor once per session and retries before an
-   unseen-epoch side counts as undecryptable. The undecryptable-side warnings
-   name which of was-client's two no-key classes the side was
-   (`reason: 'unknown-epoch' | 'key-unwrap' | 'other'`, through the `./sync`
-   predicates), so a spent or unwired refresh is distinguishable from a key this
-   reader was never given.
-4. **The benign 412 delete retry.** A locally created row is pushed with the
-   revision it was inserted with while the server assigns its own, so a delete
-   conditional on a stale revision would be refused forever and leave the
-   resource live. A refused delete re-reads the resource, and a body unchanged
-   under a drifted revision is re-deleted against the fresh ETag; every other
-   412 is a real conflict (`src/pushWrites.ts`). Body equality alone cannot tell
-   that drift from a delete-then-recreate by another writer on a
-   content-addressed row, so when the replica was given a `writerId` and the
-   re-read primary carries one, the labels must match for the retry to fire;
-   with no label on either side, equality decides. The push-ack write-back only
-   makes the case rarer -- it is best-effort and swallows its own failure -- so
-   the retry stays the authority for deletes. A delete with no assumed primary
-   is skipped, not sent: the row was created and deleted locally before this
-   replica ever pushed it, so the replica holds no server state for it, while
-   another replica may hold a live resource under the same content-addressed id
-   (invariant 2). HTTP has no precondition for "delete only what I created" (an
-   `If-Match` needs a validator this replica never had, and a header-less
-   `DELETE` would tombstone the other replica's copy), so `src/pushWrites.ts`
-   issues no write and reports the row accepted with no ack, the create path's
-   `If-None-Match: *` guard mirrored. RxDB then settles the local tombstone as
-   the assumed primary. The replica keeps that tombstone until the resource next
-   changes on the feed (RxDB defers a pulled state behind a pending local
-   change, and the initial pull pages past the live copy while the delete is
-   still pending); the first such change brings the live copy down, since
-   nothing is pending against the row by then. The integration suite pins the
-   skip, the intact copy, and that convergence. A delete's `404` (was-client's
-   not-found signal, matched by name) is the already-gone outcome on either
-   delete call, not an error: a conformant server answers `204` for an
-   authorized delete of an absent resource, so the `404` is a masked
-   authorization refusal that no retry can advance, and rethrowing it would pin
-   the whole batch in RxDB's retry loop. Revoked access still surfaces on the
-   next feed pull. A `/meta` write's `404` is likewise not an error on its own:
-   a metadata-only edit against a resource another replica deleted is the same
-   delete race, raised as the not-found signal on the default port and as the
-   auth signal with `status: 404` on a `mapAuthErrors` port. One classifier in
-   `src/pushWrites.ts` takes both shapes to the same corroborating feed re-read,
-   and an absent or tombstoned primary resolves the row as a tombstone conflict
-   entry for the conflict handler; a primary that is alive rethrows the original
-   signal. A tombstone is absent for preconditions: a `412` whose re-read
-   resolves `null` builds a tombstone conflict entry with `version: 0` and no
-   `etag` (the plain port cannot tell a tombstone from a resource that never
-   existed, and both take the same next write), and an assumed primary with
-   `_deleted: true` routes a content write to `If-None-Match: *` and a delete to
-   an unconditional `DELETE`, since `If-Match` against a tombstone is refused
-   whatever validator it carries. That refusal is RFC 9110's rule, not a server
-   quirk: a tombstone has no current representation (which is why `GET` answers
-   `404`), and against no representation `If-None-Match: *` is true and
-   `If-Match` with any tag is false. Honoring the tombstone's surviving ETag was
-   considered and rejected on 2026-09-07: it would put WAS at odds with the HTTP
-   semantics the spec borrows, for a gain confined to one race (a third replica
-   re-creating and re-deleting in between), which the changes feed already
-   surfaces as higher-version entries for the next pull to reconcile. The
-   `/meta` half of a resurrection is a create-if-absent for the same reason: a
-   tombstone entry carries no `custom` and no `metaVersion`, so the handler
-   compares the local `custom` against nothing and sends `If-None-Match: *`, and
-   against the teaching server, whose tombstone drops the metadata object and
-   retires its validator, both halves land in one push cycle. A server that kept
-   the metadata object through a tombstone would answer that create with a
-   `412`, which costs one extra cycle (the re-read, a metadata conflict entry, a
+   coordinating. The driver mints no `updatedAtCounter` or `originId` either.
+   The only stamp member a local row carries before the server has seen it is
+   the app's own `updatedAt`. The two server-minted members reach a row from the
+   feed or a re-read primary only.
+3. **Every content push carries the row's `Key-Epoch` header.** The epoch id
+   rides `SyncedDoc.epoch` from the feed and back out through `putContent`; the
+   header itself belongs to was-client's port. The driver runs no unknown-epoch
+   refresh of its own, since it holds no cipher to rebuild (invariant 1). The
+   rule is `@interop/was-client/edv`'s, and it reaches the driver through the
+   one seam that decrypts anything, the default resolver's `decrypt` closure: a
+   consumer hands in a refreshing cipher's decrypt
+   (`createRefreshingEdvDocCipher`), which re-reads the descriptor once per
+   session and retries before an unseen-epoch side counts as undecryptable. The
+   undecryptable-side warnings name which of was-client's two no-key classes the
+   side was (`reason: 'unknown-epoch' | 'key-unwrap' | 'other'`, through the
+   `./sync` predicates), so a spent or unwired refresh is distinguishable from a
+   key this reader was never given.
+4. **The benign 412 delete retry.** A locally created row is inserted with no
+   server validator while the server assigns its own, so a delete conditional on
+   a stale validator would be refused forever and leave the resource live. A
+   refused delete re-reads the resource, and a body unchanged under a drifted
+   validator is re-deleted against the fresh ETag; every other 412 is a real
+   conflict (`src/pushWrites.ts`). Body equality alone cannot tell that drift
+   from a delete-then-recreate by another writer on a content-addressed row, so
+   when the replica was given a `writerId` and the re-read primary carries one,
+   the labels must match for the retry to fire; with no label on either side,
+   equality decides. The push-ack write-back only makes the case rarer -- it is
+   best-effort and swallows its own failure -- so the retry stays the authority
+   for deletes. A delete with no assumed primary is skipped, not sent: the row
+   was created and deleted locally before this replica ever pushed it, so the
+   replica holds no server state for it, while another replica may hold a live
+   resource under the same content-addressed id (invariant 2). HTTP has no
+   precondition for "delete only what I created" (an `If-Match` needs a
+   validator this replica never had, and a header-less `DELETE` would tombstone
+   the other replica's copy), so `src/pushWrites.ts` issues no write and reports
+   the row accepted with no ack, the create path's `If-None-Match: *` guard
+   mirrored. RxDB then settles the local tombstone as the assumed primary. The
+   replica keeps that tombstone until the resource next changes on the feed
+   (RxDB defers a pulled state behind a pending local change, and the initial
+   pull pages past the live copy while the delete is still pending); the first
+   such change brings the live copy down, since nothing is pending against the
+   row by then. The integration suite pins the skip, the intact copy, and that
+   convergence. A delete's `404` (was-client's not-found signal, matched by
+   name) is the already-gone outcome on either delete call, not an error: a
+   conformant server answers `204` for an authorized delete of an absent
+   resource, so the `404` is a masked authorization refusal that no retry can
+   advance, and rethrowing it would pin the whole batch in RxDB's retry loop.
+   Revoked access still surfaces on the next feed pull. A `/meta` write's `404`
+   is likewise not an error on its own: a metadata-only edit against a resource
+   another replica deleted is the same delete race, raised as the not-found
+   signal on the default port and as the auth signal with `status: 404` on a
+   `mapAuthErrors` port. One classifier in `src/pushWrites.ts` takes both shapes
+   to the same corroborating feed re-read, and an absent or tombstoned primary
+   resolves the row as a tombstone conflict entry for the conflict handler; a
+   primary that is alive rethrows the original signal. A tombstone is absent for
+   preconditions: a `412` whose re-read resolves `null` builds a tombstone
+   conflict entry carrying only `id`, the local `updatedAt`, and
+   `_deleted: true`, with no `etag` and no other stamp member (the plain port
+   cannot tell a tombstone from a resource that never existed, and both take the
+   same next write), and an assumed primary with `_deleted: true` routes a
+   content write to `If-None-Match: *` and a delete to an unconditional
+   `DELETE`, since `If-Match` against a tombstone is refused whatever validator
+   it carries. That refusal is RFC 9110's rule, not a server quirk: a tombstone
+   has no current representation (which is why `GET` answers `404`), and against
+   no representation `If-None-Match: *` is true and `If-Match` with any tag is
+   false. Honoring the tombstone's surviving ETag was considered and rejected on
+   2026-09-07: it would put WAS at odds with the HTTP semantics the spec
+   borrows, for a gain confined to one race (a third replica re-creating and
+   re-deleting in between), which the changes feed already surfaces as later
+   entries for the next pull to reconcile. The `/meta` half of a resurrection is
+   a create-if-absent for the same reason: a tombstone entry carries no
+   `custom`, no `meta`, and no `metaEtag`, so the handler compares the local
+   `custom` against nothing and sends `If-None-Match: *`, and against the
+   teaching server, whose tombstone drops the metadata object and retires its
+   validator, both halves land in one push cycle. A server that kept the
+   metadata object through a tombstone would answer that create with a `412`,
+   which costs one extra cycle (the re-read, a metadata conflict entry, a
    resolution) rather than failing the row. The integration suite pins both the
    one-cycle path and the refusal of a `/meta` `If-Match` carrying the
-   pre-delete validator.
+   pre-delete validator. The `/meta` create-or-update choice keys on the assumed
+   primary. A tombstone sends `If-None-Match: *` whatever `meta` or `metaEtag`
+   it carries, which is an explicit guard rather than a consequence of the
+   entry's shape. Otherwise a primary carrying `meta` or `metaEtag` is an
+   update, sent with `If-Match: <metaEtag>` when the validator is held and
+   unconditionally when it is not (the hidden-`ETag` case). With neither it is a
+   create. Keying on `meta` alone would send a create for the state after this
+   replica's own `/meta` write and before its echo, which holds `metaEtag` and
+   no `meta`. Keying on `metaEtag` alone would misroute the hidden-`ETag` state.
 5. **Cross-package errors match by `err.name`, never `instanceof`.** Every error
    this driver classifies is was-client's, raised inside a seam the app injects,
    and that seam can resolve to a second copy of was-client. The predicates come
@@ -162,7 +174,17 @@ numbered so items and reviews can cite them.
    The schema ships at `version: 0` with no migration strategy, so a replica
    created under a different shape is forgotten and re-pulled rather than
    migrated. Changing the shape is a breaking change for every existing replica
-   and says so in the CHANGELOG.
+   and says so in the CHANGELOG. The forget must take the collection's
+   `rx-replication-meta-*` instance with it, or the consumer must change the
+   `replicationIdentifier`. A retained checkpoint would resume the re-pull past
+   every row and bring the new replica up empty. Local writes not yet pushed
+   when the app updates are lost with the old replica, which can no longer be
+   opened to drain them. The stamp members are stored as the server sends them,
+   with no boundary guard on length, type, or `meta` completeness. That is the
+   trust `etag`, `createdBy`, and `epoch` get. The schema bounds describe the
+   server and are not enforced here. A consumer that wraps its storage in a
+   validator takes on the consequence that a malformed server document wedges
+   the pull.
 8. **The writer id is never an identity.** Unkeyed, clearable, unrecoverable,
    derived from no secret. The key prefix is required (the package mints no
    default key two apps could collide on) and the storage is an injected port. A
@@ -207,7 +229,9 @@ numbered so items and reviews can cite them.
     The driver's swallow points reach it too now: the best-effort ack write-back
     logs its failure at `warn`, and the benign-412 delete re-issue and a
     conflict entry handed back to RxDB each log at `debug`. The old per-call
-    port could not reach those points.
+    port could not reach those points. The `debug` entries name the validators
+    (`assumedEtag`, `etag`), and the messages call a drifted or acked one a
+    validator.
 14. **The root entry never reaches `rxdb`.** Neither at runtime nor in its
     emitted declarations. A missing package is a resolution failure rather than
     something a bundler drops, and every consumer compiles with `skipLibCheck`,
@@ -258,29 +282,37 @@ numbered so items and reviews can cite them.
     holds; the two converge on the same server state either way.
 18. **The default `isEqual` compares every member of the synced document.**
     `statesEqual`, the default `isEqual` of `makeConflictHandler`, compares the
-    server-managed members along with `_deleted`, the revisions, and the two
-    bodies. Those are `id`, `updatedAt`, `createdBy`, `epoch`, `etag`, and
-    `metaEtag` (`src/conflictHandler.ts`). The bodies compare by `bodiesEqual`
-    (invariant 6), and every other member compares strictly. RxDB writes a
-    pulled state into the local row only where `isEqual` says the two differ,
-    and the echo of this replica's own write is where that matters. By the time
-    the echo arrives, the ack write-back has already stamped the row with the
-    server's `version` and `etag`. What is left to differ is what the server
-    alone assigns, namely `createdBy` and the server's `updatedAt`. An ack whose
-    revision is absent or `0` stamps no `version` (see Ack in the Glossary), so
-    its echo differs in `version` as well. An equality limited to the bodies and
-    revisions let RxDB skip the echo. Every row a replica created then kept the
-    client's `updatedAt` and never learned its `createdBy`. A consumer that
-    injects its own `isEqual` takes on the same requirement. One timing window
-    remains, tracked as WS-17. RxDB defers a pulled state for a row whose local
-    state differs from its assumed primary, and the pull checkpoint still moves
-    past it, so the deferred state is never pulled again. The ack write-back is
-    a plain local write, so the row is in that state until the push cycle it
-    triggers has run. An echo pulled inside that window is dropped whatever
-    `isEqual` says. The window holds no HTTP round trip, so a polling pull
-    rarely lands in it, but a pull nudged right after a push does. The
-    integration suite therefore waits for pushes to settle before it nudges a
-    pull.
+    server-managed members along with `_deleted`, the stamp members, and the two
+    bodies. The members are `id`, `updatedAt`, `updatedAtCounter`, `originId`,
+    `createdBy`, `epoch`, `etag`, `metaEtag`, and `meta`
+    (`src/conflictHandler.ts`); the optional ones are read off the one key table
+    (`optionalBodyFields` in `src/types.ts`) that `copyOptionalBodyFields` and
+    the schema test also run on, so a new optional member is declared once. The
+    bodies and `meta` compare by `bodiesEqual` (invariant 6), so two distinct
+    but member-equal `meta` objects are equal and a member the server adds later
+    still registers as a difference. Every other member compares strictly, and
+    an absent member equals only an absent one. RxDB writes a pulled state into
+    the local row only where `isEqual` says the two differ, and the echo of this
+    replica's own write is where that matters. By the time the echo arrives, the
+    ack write-back has already stamped the row with the server's `etag` and
+    `metaEtag`, and nothing else (see Ack in the Glossary). What is left to
+    differ is what the server alone assigns, namely `createdBy`, the server's
+    `updatedAt`, `updatedAtCounter`, `originId`, and `meta`, so the echo is
+    written. An equality limited to the bodies and validators let RxDB skip the
+    echo. Every row a replica created then kept the client's `updatedAt` and
+    never learned its `createdBy` or a server stamp. An edited row's
+    `updatedAtCounter` and `originId` describe the last server state the row
+    learned, not the edit. The echo of the edit differs in them and replaces
+    that hybrid. A consumer that injects its own `isEqual` takes on the same
+    requirement. One timing window remains, tracked as WS-17. RxDB defers a
+    pulled state for a row whose local state differs from its assumed primary,
+    and the pull checkpoint still moves past it, so the deferred state is never
+    pulled again. The ack write-back is a plain local write, so the row is in
+    that state until the push cycle it triggers has run. An echo pulled inside
+    that window is dropped whatever `isEqual` says. The window holds no HTTP
+    round trip, so a polling pull rarely lands in it, but a pull nudged right
+    after a push does. The integration suite therefore waits for pushes to
+    settle before it nudges a pull.
 
 ## Ownership heuristics
 
@@ -300,11 +332,11 @@ numbered so items and reviews can cite them.
   and filter nothing themselves. The skipped kinds and the non-JSON-Resource
   outcome are tested in was-client.
 - **The last-write-wins comparison** belongs to `@interop/social-core`
-  (`remotePayloadWins`). This package reads the stamp off a payload
+  (`remotePayloadWins`). This package reads the payload's LWW fields
   (`lwwFields`) and applies whichever comparator it is handed.
 - **A conflict policy for a particular collection** belongs to the consuming
   app, as the injected resolver. A wallet delegates to its own contacts
-  comparator; an app framework compares decrypted stamps through the default.
+  comparator; an app framework compares decrypted payloads through the default.
 - **Key material, ciphers, key epochs, and the descriptor-refresh policy**
   belong to `@interop/was-client/edv` (`createRefreshingEdvDocCipher`,
   `DescriptorRefreshPolicy`, `acquireDescriptor`); wiring them into a
@@ -347,9 +379,12 @@ the byoe-ecosystem layer map instead.
   `setLogger`; the one place the package's diagnostics leave through. Avoid: log
   port, SyncLogPort, logger option.
 - **Primary state** -- the server's current state of one resource, as re-read
-  for the 412 conflict path (`PrimaryState`, `withFeedPrimaryRead`). RxDB's own
-  field names on a push row (`assumedMasterState`, `realMasterState`) are RxDB's
-  API and stay as they are. Avoid: master state, remote state.
+  for the 412 conflict path (`PrimaryState`, `withFeedPrimaryRead`). It carries
+  the validators (`etag`, `metaEtag`), the write stamp members
+  (`updatedAtCounter`, `originId`, and `meta`, each optional), `writerId`, and
+  the tombstone flag. RxDB's own field names on a push row
+  (`assumedMasterState`, `realMasterState`) are RxDB's API and stay as they are.
+  Avoid: master state, remote state.
 - **Replication checkpoint** -- the record the pull handler hands RxDB and RxDB
   persists in its replication meta (`ReplicationCheckpoint`): the opaque
   `SyncCheckpoint` string under a `checkpoint` member. RxDB stacks checkpoints
@@ -357,45 +392,50 @@ the byoe-ecosystem layer map instead.
   characters, so the string is wrapped for RxDB and unwrapped for the port.
   Avoid: RxDB checkpoint, checkpoint object.
 - **Wire doc** -- one JSON Resource document of the `changes` feed as the sync
-  port hands it on (`WireDoc`), with the feed's `deleted` renamed `_deleted`.
-  Contrast the **change document**, any entry of the raw feed whatever its
-  `kind`, which the driver never sees (see Ownership heuristics), and the
-  **synced doc** (`SyncedDoc`), the same document as the local replica stores
-  it. Avoid: row payload.
+  port hands it on (`WireDoc`), with the feed's `deleted` renamed `_deleted`. It
+  carries `updatedAt`, `updatedAtCounter`, and `originId` on every document,
+  `meta` once metadata has been written, and the validators. Contrast the
+  **change document**, any entry of the raw feed whatever its `kind`, which the
+  driver never sees (see Ownership heuristics), and the **synced doc**
+  (`SyncedDoc`), the same document as the local replica stores it. Avoid: row
+  payload.
 - **Conflict entry** -- the primary state the push handler returns for a row the
-  server refused, which is what RxDB's push contract asks for. Avoid: conflict
-  result, rejection.
-- **Ack** -- the server revision and opaque `ETag` an accepted write earned
-  (`PushWriteAck`), written back into the local row so the next conditional
-  write's `If-Match` echoes what the server holds. The write-back
-  (`createAckWriteBack` in `src/wasReplication.ts`) stamps a `version` or
-  `metaVersion` only when it is a real revision. An absent value and `0` are
-  both skipped. A WAS resource's first revision is `1`, so `0` is never assigned
-  by a server. It is was-client's fallback for an `ETag` the port could not read
-  (hidden from a cross-origin caller) or could not parse a revision out of.
-  Stamping it would replace the row's last real revision with an invented one.
-  The row keeps that revision until the feed's echo brings the real one down. An
-  `etag` or `metaEtag` the ack does carry is still stamped, and an ack carrying
-  only a validator is still an ack: since was-client 0.86.0 the port sets no
-  `version` for an `ETag` with no parseable revision, so the push handler
-  reports a write accepted when any of the four members is present. The local
-  row's `version` stays required. `0` is its "no known revision" value: a fresh
-  row carries it, the tombstone conflict entry carries it, and a re-read primary
-  with no `version` is reported with it. The two rules meet here: the driver
-  writes `0` only where no revision is known, and the write-back never adopts a
-  `0` from the server. Avoid: receipt, confirmation.
+  server refused, which is what RxDB's push contract asks for. The tombstone
+  variant (the re-read found no live resource) carries the local `updatedAt` and
+  no other stamp member. Avoid: conflict result, rejection.
+- **Ack** -- the opaque `ETag` validators an accepted write earned
+  (`PushWriteAck`, `{ id, etag?, metaEtag? }`), written back into the local row
+  so the next conditional write's `If-Match` echoes what the server holds. The
+  write-back (`createAckWriteBack` in `src/wasReplication.ts`) patches those
+  validators and nothing else. The stamp reaches the row from the echo or from a
+  conflict entry. A validator alone is an ack: the push handler reports a write
+  accepted when `etag` or `metaEtag` is present, and an accepted write whose
+  `ETag` is hidden from a cross-origin caller carries neither and acks nothing.
+  Avoid: receipt, confirmation.
 - **Echo** -- the `changes` feed entry for a write this replica pushed, pulled
   back down on a later cycle. It is the only way what the server alone assigns
   (`createdBy`, the server's `updatedAt`) reaches the local row, since the ack
-  carries only revisions and ETags (invariant 18). Avoid: reflection, bounce.
+  carries only validators (invariant 18). The echo alone also brings the stamp
+  members (`updatedAtCounter`, `originId`, `meta`). Avoid: reflection, bounce.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
-  agent produced a revision; it attributes history and breaks last-write-wins
-  ties. On the wire it is the WAS `writerId`, which the push handler declares
-  when the app injects one (invariant 17). Avoid: device id, replica id, client
-  id (a client id is keyed and custodied; this is neither).
+  agent produced a write; it attributes history and breaks last-write-wins ties.
+  On the wire it is the WAS `writerId`, which the push handler declares when the
+  app injects one (invariant 17). It is distinct from `originId`, which names
+  the store that minted a stamp and is not an attribution label. Avoid: device
+  id, replica id, client id (a client id is keyed and custodied; this is
+  neither).
+- **Write stamp** -- the `(updatedAt, updatedAtCounter, originId)` triple the
+  server mints on every versioned record (storage-core's `WriteStamp`). The
+  `/meta` record's own stamp and its `generation` nest under `meta`
+  (`ResourceMetaStamp`). The driver stores and compares the stamp and mints none
+  of it. On a local row it is the last server state the row learned, not a
+  description of a local edit, so a consumer must not read it as an order key.
+  Avoid: revision, version, HLC stamp. Not the payload's `(updatedAt, writerId)`
+  pair that `lwwFields` reads out of a decrypted body, and not the key epoch id.
 - **Key epoch** -- the opaque id of the key a stored envelope was encrypted
-  under, carried verbatim on `SyncedDoc.epoch` and stamped on the content push.
-  The driver never interprets it. Avoid: key version, epoch key.
+  under, carried verbatim on `SyncedDoc.epoch` and sent in the `Key-Epoch`
+  header on the content push. The driver never interprets it. Avoid: key
+  version, epoch key.
 - **Conflict decrypt** -- the closure the default resolver opens both sides of a
   mutable-head conflict with (`ConflictDecrypt`, was-client's
   `DocCipher.decrypt`). It is the only seam in the driver that reads a body, and

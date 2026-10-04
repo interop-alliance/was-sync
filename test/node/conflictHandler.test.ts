@@ -6,6 +6,7 @@ import { captureLogger } from '@interop/logger'
 
 import type { Json, SyncedDoc, WithDeleted } from '../../src/types.js'
 import { setLogger } from '../../src/log.js'
+import { metaStamp } from './fixtures.js'
 import {
   lwwResolver,
   makeConflictHandler,
@@ -58,14 +59,16 @@ function row(
   payload: { updatedAt: string; writerId: string } | null,
   {
     deleted = false,
-    version = 0,
-    metaVersion,
+    counter,
+    originId,
+    meta,
     custom,
     id = 'r1'
   }: {
     deleted?: boolean
-    version?: number
-    metaVersion?: number
+    counter?: number
+    originId?: string
+    meta?: SyncedDoc['meta']
     custom?: Json
     id?: string
   } = {}
@@ -73,14 +76,19 @@ function row(
   const doc: WithDeleted<SyncedDoc> = {
     id,
     updatedAt: '2026-01-01T00:00:00Z',
-    version,
     _deleted: deleted
   }
   if (payload !== null) {
     doc.data = { jwe: payload } as unknown as Json
   }
-  if (metaVersion !== undefined) {
-    doc.metaVersion = metaVersion
+  if (counter !== undefined) {
+    doc.updatedAtCounter = counter
+  }
+  if (originId !== undefined) {
+    doc.originId = originId
+  }
+  if (meta !== undefined) {
+    doc.meta = meta
   }
   if (custom !== undefined) {
     doc.custom = custom
@@ -92,11 +100,10 @@ function row(
  * A live row carrying one of the marker bodies above, as distinct from a
  * tombstone or a body with no LWW stamp.
  */
-function markerRow(marker: string, version = 0): WithDeleted<SyncedDoc> {
+function markerRow(marker: string): WithDeleted<SyncedDoc> {
   return {
     id: 'r1',
     updatedAt: '2026-01-01T00:00:00Z',
-    version,
     _deleted: false,
     data: { jwe: marker } as unknown as Json
   }
@@ -106,8 +113,8 @@ function markerRow(marker: string, version = 0): WithDeleted<SyncedDoc> {
  * A live row whose body does not decrypt on this client (an envelope under an
  * unseen key epoch).
  */
-function sealedRow(version = 0): WithDeleted<SyncedDoc> {
-  return markerRow(SEALED, version)
+function sealedRow(): WithDeleted<SyncedDoc> {
+  return markerRow(SEALED)
 }
 
 const handler = makeLwwConflictHandler(decrypt)
@@ -150,22 +157,27 @@ describe('makeLwwConflictHandler', () => {
     expect(handler.isEqual(withCustom, a)).toBe(false)
   })
 
-  it('isEqual is false when only the server revision differs (feed echo)', () => {
+  it('isEqual is false when only the server stamp differs (feed echo)', () => {
     // Our own write echoing back from the changes feed: byte-identical body,
-    // but one revision ahead. It must NOT compare equal, so the local row
-    // adopts the server version and later If-Match headers stay in step.
-    const local = row({ updatedAt: 't1', writerId: 'd1' }, { version: 0 })
-    const echo = row({ updatedAt: 't1', writerId: 'd1' }, { version: 1 })
+    // but one counter ahead. It must NOT compare equal, so the local row
+    // adopts the server stamp and later If-Match headers stay in step.
+    const local = row({ updatedAt: 't1', writerId: 'd1' }, { counter: 0 })
+    const echo = row({ updatedAt: 't1', writerId: 'd1' }, { counter: 1 })
     expect(handler.isEqual(local, echo)).toBe(false)
     expect(handler.isEqual(echo, { ...echo })).toBe(true)
-    expect(handler.isEqual(echo, { ...echo, metaVersion: 1 })).toBe(false)
+    expect(
+      handler.isEqual(echo, {
+        ...echo,
+        meta: metaStamp({ updatedAtCounter: 1 })
+      })
+    ).toBe(false)
   })
 
   it('isEqual is false when only a server-managed member differs', () => {
     // The echo of this replica's own write, after the ack write-back has
     // already stamped `version` / `etag`: only what the server alone assigns
     // is left to differ, and each of those must still land in the local row.
-    const stamped = row({ updatedAt: 't1', writerId: 'd1' }, { version: 1 })
+    const stamped = row({ updatedAt: 't1', writerId: 'd1' }, { counter: 1 })
     stamped.etag = '"g1-1"'
     expect(handler.isEqual(stamped, { ...stamped })).toBe(true)
     expect(
@@ -180,6 +192,75 @@ describe('makeLwwConflictHandler', () => {
       false
     )
     expect(handler.isEqual(stamped, { ...stamped, id: 'r2' })).toBe(false)
+  })
+
+  it('isEqual differs on updatedAtCounter and on originId', () => {
+    const base = row(
+      { updatedAt: 't1', writerId: 'd1' },
+      { counter: 1, originId: 'o1' }
+    )
+    expect(handler.isEqual(base, { ...base })).toBe(true)
+    expect(handler.isEqual(base, { ...base, updatedAtCounter: 2 })).toBe(false)
+    expect(handler.isEqual(base, { ...base, originId: 'o2' })).toBe(false)
+  })
+
+  it('isEqual treats updatedAtCounter 0 as present, not absent', () => {
+    const absent = row({ updatedAt: 't1', writerId: 'd1' })
+    const zero = row({ updatedAt: 't1', writerId: 'd1' }, { counter: 0 })
+    expect(absent.updatedAtCounter).toBeUndefined()
+    expect(zero.updatedAtCounter).toBe(0)
+    expect(handler.isEqual(absent, zero)).toBe(false)
+    expect(handler.isEqual(zero, { ...zero })).toBe(true)
+  })
+
+  it('isEqual differs on each meta member', () => {
+    const base = row(
+      { updatedAt: 't1', writerId: 'd1' },
+      { meta: metaStamp({ updatedAtCounter: 1 }) }
+    )
+    expect(handler.isEqual(base, { ...base })).toBe(true)
+    expect(handler.isEqual(base, { ...base, meta: undefined })).toBe(false)
+    for (const overrides of [
+      { updatedAt: '2026-02-02T00:00:00Z' },
+      { updatedAtCounter: 2 },
+      { originId: 'origin-other' },
+      { generation: 'g2' }
+    ]) {
+      expect(
+        handler.isEqual(base, {
+          ...base,
+          meta: metaStamp({ updatedAtCounter: 1, ...overrides })
+        })
+      ).toBe(false)
+    }
+  })
+
+  it('isEqual compares meta canonically, not by identity or key order', () => {
+    const base = row(
+      { updatedAt: 't1', writerId: 'd1' },
+      { meta: metaStamp({ updatedAtCounter: 1 }) }
+    )
+    const distinct = {
+      ...base,
+      meta: { ...metaStamp({ updatedAtCounter: 1 }) }
+    }
+    expect(distinct.meta).not.toBe(base.meta)
+    expect(handler.isEqual(base, distinct)).toBe(true)
+    const reordered = {
+      ...base,
+      meta: {
+        generation: 'gen-a',
+        originId: 'origin-a',
+        updatedAtCounter: 1,
+        updatedAt: '2026-01-01T00:00:00Z'
+      }
+    }
+    expect(handler.isEqual(base, reordered)).toBe(true)
+    const extra = {
+      ...base,
+      meta: { ...metaStamp({ updatedAtCounter: 1 }), added: 'later' }
+    } as unknown as WithDeleted<SyncedDoc>
+    expect(handler.isEqual(base, extra)).toBe(false)
   })
 
   it('resolves to the later payload (remote wins)', async () => {
@@ -215,7 +296,7 @@ describe('makeLwwConflictHandler', () => {
   it('keeps a live local edit over a remote tombstone', async () => {
     // A tombstone has nothing to decrypt: it is absent, not undecryptable, so
     // the edit wins by the tombstone rule with no warning logged.
-    const remote = row(null, { deleted: true, version: 3 })
+    const remote = row(null, { deleted: true, counter: 3 })
     const local = row({ updatedAt: 'T', writerId: 'dA' })
     const winner = await handler.resolve({
       realMasterState: remote,
@@ -226,7 +307,7 @@ describe('makeLwwConflictHandler', () => {
   })
 
   it('defaults to the primary when incomparable (local tombstone)', async () => {
-    const remote = row({ updatedAt: 'T', writerId: 'dB' }, { version: 2 })
+    const remote = row({ updatedAt: 'T', writerId: 'dB' }, { counter: 2 })
     const local = row(null, { deleted: true })
     const winner = await handler.resolve({
       realMasterState: remote,
@@ -235,13 +316,13 @@ describe('makeLwwConflictHandler', () => {
     expect(winner).toBe(remote)
   })
 
-  it('re-asserts a local tombstone on a version-only conflict (delete after a synced create)', async () => {
-    // The classic dropped-delete: the row's If-Match was one revision stale,
+  it('re-asserts a local tombstone on a validator-only conflict (delete after a synced create)', async () => {
+    // The classic dropped-delete: the row's If-Match was one stamp stale,
     // but the primary's content is exactly what this replica last synced. The
     // tombstone must survive resolution and be re-pushed -- not resurrect.
     const payload = { updatedAt: 'T', writerId: 'dA' }
-    const assumed = row(payload, { version: 0 })
-    const primary = row(payload, { version: 1 })
+    const assumed = row(payload, { counter: 0 })
+    const primary = row(payload, { counter: 1 })
     const tombstone = row(null, { deleted: true })
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -251,12 +332,12 @@ describe('makeLwwConflictHandler', () => {
     expect(winner).toBe(tombstone)
   })
 
-  it('re-asserts a local edit on a version-only conflict', async () => {
+  it('re-asserts a local edit on a validator-only conflict', async () => {
     // The edit's stamp is OLDER than the primary's, so rule 4 would pick the
-    // primary: only the version-only rule yields the local edit.
+    // primary: only the validator-only rule yields the local edit.
     const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
-    const assumed = row(payload, { version: 0 })
-    const primary = row(payload, { version: 1 })
+    const assumed = row(payload, { counter: 0 })
+    const primary = row(payload, { counter: 1 })
     const edit = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -270,8 +351,8 @@ describe('makeLwwConflictHandler', () => {
     // The primary's content REALLY changed since this replica last synced (a
     // concurrent edit on another client won the push race): the edit wins and
     // the entity resurrects, deterministically on every replica.
-    const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
-    const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
+    const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
+    const primary = row({ updatedAt: 'T2', writerId: 'dB' }, { counter: 2 })
     const tombstone = row(null, { deleted: true })
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -284,24 +365,24 @@ describe('makeLwwConflictHandler', () => {
 
   it('lets the real primary win for custom on a metadata-only conflict (no data change)', async () => {
     // Clients A and B both edit only `custom` of the same resource. A's
-    // `/meta` write commits first (metaVersion bumps); B's putMeta 412s, so the
+    // `/meta` write commits first (the `meta` stamp advances); B's putMeta 412s, so the
     // assembled primary carries A's committed `custom` with `data` unchanged.
     // The equal-`data` LWW payloads would tie and keep B's stale `custom`; rule
     // 2 instead adopts the server-committed metadata so A's edit is not lost.
     const payload = { updatedAt: 'T', writerId: 'dA' }
     const assumed = row(payload, {
-      version: 3,
-      metaVersion: 1,
+      counter: 3,
+      meta: metaStamp({ updatedAtCounter: 1 }),
       custom: { jwe: 'C0' }
     })
     const primary = row(payload, {
-      version: 3,
-      metaVersion: 2,
+      counter: 3,
+      meta: metaStamp({ updatedAtCounter: 2 }),
       custom: { jwe: 'Ca' }
     })
     const localEdit = row(payload, {
-      version: 3,
-      metaVersion: 1,
+      counter: 3,
+      meta: metaStamp({ updatedAtCounter: 1 }),
       custom: { jwe: 'Cb' }
     })
     const winner = await handler.resolve({
@@ -312,25 +393,29 @@ describe('makeLwwConflictHandler', () => {
     expect(winner).toBe(primary)
   })
 
-  it('re-asserts local state on a version-only conflict when custom is also unchanged', async () => {
-    // Both `data` and `custom` match the assumed primary (only the revision
+  it('re-asserts local state on a validator-only conflict when custom is also unchanged', async () => {
+    // Both `data` and `custom` match the assumed primary (only the stamp
     // moved), so rule 1 fires even though metadata exists: keep the local edit.
     // The edit's stamp is OLDER than the primary's, so rule 4 would pick the
-    // primary: only the version-only rule yields the local edit.
+    // primary: only the validator-only rule yields the local edit.
     const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
     const assumed = row(payload, {
-      version: 0,
-      metaVersion: 1,
+      counter: 0,
+      meta: metaStamp({ updatedAtCounter: 1 }),
       custom: { jwe: 'C0' }
     })
     const primary = row(payload, {
-      version: 1,
-      metaVersion: 1,
+      counter: 1,
+      meta: metaStamp({ updatedAtCounter: 1 }),
       custom: { jwe: 'C0' }
     })
     const edit = row(
       { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
-      { version: 0, metaVersion: 1, custom: { jwe: 'C0' } }
+      {
+        counter: 0,
+        meta: metaStamp({ updatedAtCounter: 1 }),
+        custom: { jwe: 'C0' }
+      }
     )
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -340,12 +425,99 @@ describe('makeLwwConflictHandler', () => {
     expect(winner).toBe(edit)
   })
 
+  it('rule 1 resolves local when the primary differs only in stamp members or meta', async () => {
+    // Rules 1 and 2 compare bodies, not stamps. Each primary below moves a
+    // stamp member the assumed one does not, with the bodies equal and an
+    // older local edit that rule 4 would lose.
+    const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
+    const assumed = row(payload, {
+      counter: 1,
+      originId: 'o1',
+      meta: metaStamp({ updatedAtCounter: 1 }),
+      custom: { jwe: 'C0' }
+    })
+    const variants = [
+      { counter: 2 },
+      { originId: 'o2' },
+      { meta: metaStamp({ updatedAtCounter: 2 }) },
+      { meta: metaStamp({ updatedAtCounter: 1, generation: 'g2' }) },
+      { counter: 2, originId: 'o2', meta: metaStamp({ updatedAtCounter: 3 }) }
+    ]
+    for (const variant of variants) {
+      const primary = row(payload, {
+        counter: 1,
+        originId: 'o1',
+        meta: metaStamp({ updatedAtCounter: 1 }),
+        custom: { jwe: 'C0' },
+        ...variant
+      })
+      const edit = row(
+        { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
+        { counter: 1, originId: 'o1', custom: { jwe: 'C0' } }
+      )
+      const winner = await handler.resolve({
+        realMasterState: primary,
+        newDocumentState: edit,
+        assumedMasterState: assumed
+      })
+      expect(winner).toBe(edit)
+    }
+  })
+
+  it('rule 2 resolves remote on a custom change whatever the stamps say', async () => {
+    const payload = { updatedAt: 'T', writerId: 'dA' }
+    const assumed = row(payload, {
+      counter: 5,
+      originId: 'o1',
+      meta: metaStamp({ updatedAtCounter: 5 }),
+      custom: { jwe: 'C0' }
+    })
+    for (const stamps of [
+      { counter: 1, originId: 'o0', meta: metaStamp({ updatedAtCounter: 1 }) },
+      { counter: 9, originId: 'o9', meta: metaStamp({ updatedAtCounter: 9 }) },
+      {}
+    ]) {
+      const primary = row(payload, { ...stamps, custom: { jwe: 'Ca' } })
+      const edit = row(payload, {
+        counter: 5,
+        originId: 'o1',
+        meta: metaStamp({ updatedAtCounter: 5 }),
+        custom: { jwe: 'Cb' }
+      })
+      const winner = await handler.resolve({
+        realMasterState: primary,
+        newDocumentState: edit,
+        assumedMasterState: assumed
+      })
+      expect(winner).toBe(primary)
+    }
+  })
+
+  it('returns a local winner with its stale stamp members unchanged', async () => {
+    const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
+    const assumed = row(payload, { counter: 1, originId: 'o1' })
+    const primary = row(payload, { counter: 2, originId: 'o2' })
+    const edit = row(
+      { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
+      { counter: 1, originId: 'o1', meta: metaStamp({ updatedAtCounter: 1 }) }
+    )
+    const winner = await handler.resolve({
+      realMasterState: primary,
+      newDocumentState: edit,
+      assumedMasterState: assumed
+    })
+    expect(winner).toBe(edit)
+    expect(winner.updatedAtCounter).toBe(1)
+    expect(winner.originId).toBe('o1')
+    expect(winner.meta).toEqual(metaStamp({ updatedAtCounter: 1 }))
+  })
+
   it('adopts an undecryptable primary rather than re-pushing the older local payload', async () => {
     // The primary was written under a key epoch this client has not seen, so its
     // decrypt throws. It must NOT be scored as absent: an unreadable body is
     // presumed newer, so the primary is adopted and the older local payload is
     // not pushed over it.
-    const primary = sealedRow(2)
+    const primary = sealedRow()
     const local = row({ updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' })
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -367,10 +539,10 @@ describe('makeLwwConflictHandler', () => {
     const primary = row(
       { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' },
       {
-        version: 2
+        counter: 2
       }
     )
-    const local = sealedRow(1)
+    const local = sealedRow()
     const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: local
@@ -380,8 +552,8 @@ describe('makeLwwConflictHandler', () => {
   })
 
   it('adopts the primary when neither side decrypts', async () => {
-    const primary = sealedRow(2)
-    const local = sealedRow(1)
+    const primary = sealedRow()
+    const local = sealedRow()
     const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: local
@@ -393,10 +565,10 @@ describe('makeLwwConflictHandler', () => {
   it('re-asserts a local tombstone against a remote tombstone race (both deleted)', async () => {
     // A delete/delete race that 412s: the primary is already a tombstone with
     // no data, matching the assumed primary shape -- keeping either converges;
-    // the version-only rule keeps the local one.
-    const assumed = row(null, { deleted: true, version: 1 })
-    const primary = row(null, { deleted: true, version: 2 })
-    const tombstone = row(null, { deleted: true, version: 1 })
+    // the validator-only rule keeps the local one.
+    const assumed = row(null, { deleted: true, counter: 1 })
+    const primary = row(null, { deleted: true, counter: 2 })
+    const tombstone = row(null, { deleted: true, counter: 1 })
     const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: tombstone,
@@ -411,8 +583,8 @@ describe('makeConflictHandler', () => {
     const handlerWithResolver = makeConflictHandler({
       resolve: async () => 'local'
     })
-    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
-    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
+    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { counter: 2 })
+    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
     await expect(
       handlerWithResolver.resolve({
         realMasterState: remote,
@@ -425,8 +597,8 @@ describe('makeConflictHandler', () => {
     const handlerWithResolver = makeConflictHandler({
       resolve: async () => 'remote'
     })
-    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
-    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
+    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { counter: 2 })
+    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
     await expect(
       handlerWithResolver.resolve({
         realMasterState: remote,
@@ -443,15 +615,15 @@ describe('makeConflictHandler', () => {
         return 'remote'
       }
     })
-    const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
+    const assumed = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
     const remote = row(
       { updatedAt: 'T1', writerId: 'dA' },
       {
-        version: 2,
+        counter: 2,
         custom: { label: 'from another client' } as unknown as Json
       }
     )
-    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
+    const local = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
     await handlerWithResolver.resolve({
       realMasterState: remote,
       newDocumentState: local,
@@ -476,7 +648,7 @@ describe('makeConflictHandler', () => {
         throw boom
       }
     })
-    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { version: 2 })
+    const remote = row({ updatedAt: 'T2', writerId: 'dB' }, { counter: 2 })
     await expect(
       handlerWithResolver.resolve({
         realMasterState: remote,
@@ -489,8 +661,8 @@ describe('makeConflictHandler', () => {
   })
 
   it('keeps the default isEqual, and takes an injected one', () => {
-    const equal = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 1 })
-    const echo = row({ updatedAt: 'T1', writerId: 'dA' }, { version: 2 })
+    const equal = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 1 })
+    const echo = row({ updatedAt: 'T1', writerId: 'dA' }, { counter: 2 })
     const defaulted = makeConflictHandler({ resolve: async () => 'remote' })
     expect(defaulted.isEqual(equal, { ...equal })).toBe(true)
     expect(defaulted.isEqual(equal, echo)).toBe(false)
@@ -515,7 +687,7 @@ describe('lwwResolver decrypt addressing and integrity', () => {
     // too.
     const primary = row(
       { updatedAt: 'T2', writerId: 'dB' },
-      { version: 2, id: 'row-primary' }
+      { counter: 2, id: 'row-primary' }
     )
     primary.data = {
       id: 'envelope-decoy-primary',
@@ -555,7 +727,7 @@ describe('lwwResolver decrypt addressing and integrity', () => {
     const resolve = lwwResolver({ decrypt })
     await expect(
       resolve({
-        realMasterState: markerRow(TAMPERED, 2),
+        realMasterState: markerRow(TAMPERED),
         newDocumentState: row({ updatedAt: 'T1', writerId: 'dA' })
       })
     ).rejects.toThrow(/was not written for resource/)
@@ -569,9 +741,9 @@ describe('lwwResolver decrypt addressing and integrity', () => {
       handler.resolve({
         realMasterState: row(
           { updatedAt: 'T2', writerId: 'dB' },
-          { version: 2 }
+          { counter: 2 }
         ),
-        newDocumentState: markerRow(TAMPERED, 1)
+        newDocumentState: markerRow(TAMPERED)
       })
     ).rejects.toThrow(/was not written for resource/)
     expect(logged('error')).toHaveLength(1)
@@ -581,7 +753,7 @@ describe('lwwResolver decrypt addressing and integrity', () => {
   it('leaves the no-key classes in the undecryptable bucket', async () => {
     // The mirror of the integrity case: a key this reader was never given is
     // still presumed newer and still only warns.
-    const primary = markerRow(UNWRAPPABLE, 2)
+    const primary = markerRow(UNWRAPPABLE)
     const winner = await handler.resolve({
       realMasterState: primary,
       newDocumentState: row({
@@ -603,7 +775,7 @@ describe('lwwResolver decrypt addressing and integrity', () => {
     const resolve = lwwResolver({
       decrypt: async () => new Blob(['chunked'])
     })
-    const primary = markerRow('anything', 2)
+    const primary = markerRow('anything')
     await expect(
       resolve({
         realMasterState: primary,
@@ -623,7 +795,7 @@ describe('lwwResolver undecryptable warnings', () => {
       ['debug', 'info', 'log', 'warn', 'error'] as const
     ).map(method => vi.spyOn(console, method).mockImplementation(() => {}))
     try {
-      const primary = sealedRow(2)
+      const primary = sealedRow()
       await expect(
         handler.resolve({
           realMasterState: primary,

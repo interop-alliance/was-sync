@@ -17,7 +17,9 @@ import {
 import { createPushHandler, type PushWriteAck } from '../../src/pushWrites.js'
 import { withFeedPrimaryRead } from '../../src/feedPrimaryPort.js'
 import { setLogger } from '../../src/log.js'
+import { metaStamp, wire } from './fixtures.js'
 import type {
+  PrimaryReadCache,
   PrimaryState,
   SyncedDoc,
   WasSyncBasePort,
@@ -28,17 +30,34 @@ import type {
 } from '../../src/types.js'
 
 /**
- * A deterministic, opaque-looking test etag for a given revision number. The
- * real server's `ETag` cannot be rebuilt from a revision number (it is
- * opaque), so every fixture that wants a conditional write to fire must set
- * this explicitly on the fixture rather than have it derived.
+ * A deterministic, opaque-looking content etag for the n-th accepted write.
+ * The real server's `ETag` is opaque and no stamp member rebuilds it, so every
+ * fixture that wants a conditional write to fire must set this explicitly on
+ * the fixture rather than have it derived.
  *
- * @param version {number}
+ * @param count {number}
  * @returns {string}
  */
-function etagFor(version: number): string {
-  return `"etag-${version}"`
+function etagFor(count: number): string {
+  return `"etag-${count}"`
 }
+
+/**
+ * The `/meta` counterpart of {@link etagFor}, distinct from it so an ack
+ * assertion tells which write earned which validator.
+ *
+ * @param count {number}
+ * @returns {string}
+ */
+function metaEtagFor(count: number): string {
+  return `"meta-etag-${count}"`
+}
+
+/**
+ * The server-minted halves of a content write stamp, as a stamped server state
+ * carries them beside `updatedAt`.
+ */
+const contentStamp = { updatedAtCounter: 3, originId: 'origin-a' }
 
 type WriteCall =
   | {
@@ -65,13 +84,15 @@ type WriteCall =
  * options object it received, so an absent member -- a cleared `custom`, an
  * absent `epoch` -- is genuinely absent from the record and testable with
  * `in`), optionally throws a conflict, a not-found signal, a masked-404 auth
- * error, or the guarded-write refusal for a chosen (kind,id), serves a scripted `get` primary state (or a scripted `get`
- * rejection) for the re-read, and acks writes like a versioning server: each
- * accepted content write returns the next content version + its etag (via
- * {@link etagFor}), each accepted meta write the next metaVersion + its etag
- * (starting at 1, like the reference server's create). `ackWrites: false`
- * models a server that exposes no ETag on write responses (e.g. cross-origin
- * without `Access-Control-Expose-Headers`).
+ * error, or the guarded-write refusal for a chosen (kind,id), serves a scripted
+ * `get` primary state (or a scripted `get` rejection) for the re-read while
+ * recording the options each `get` received, and acks writes like a server
+ * that exposes its validators: each accepted content write returns the next
+ * content etag (via {@link etagFor}), each accepted meta write the next meta
+ * etag (via {@link metaEtagFor}), counted per id from 1. `ackWrites: false`
+ * models a server whose write responses carry no `ETag` the client can read
+ * (e.g. cross-origin without `Access-Control-Expose-Headers`): every write is
+ * accepted with an empty ack.
  */
 function fakePushPort(
   options: {
@@ -81,15 +102,18 @@ function fakePushPort(
     primary?: PrimaryState | null
     getRejectsWith?: unknown
     ackWrites?: boolean
-    opaqueEtags?: boolean
   } = {}
-): WasSyncPort & { writes: WriteCall[]; getCalls: string[] } {
+): WasSyncPort & {
+  writes: WriteCall[]
+  getCalls: string[]
+  getOptions: Array<{ id: string; cache?: PrimaryReadCache }>
+} {
   const ackWrites = options.ackWrites ?? true
-  const opaqueEtags = options.opaqueEtags ?? false
   const writes: WriteCall[] = []
   const getCalls: string[] = []
-  const versions = new Map<string, number>()
-  const metaVersions = new Map<string, number>()
+  const getOptions: Array<{ id: string; cache?: PrimaryReadCache }> = []
+  const contentWrites = new Map<string, number>()
+  const metaWrites = new Map<string, number>()
   const maybeReject = (kind: WriteCall['kind'], id: string) => {
     if (options.conflictOn?.kind === kind && options.conflictOn.id === id) {
       throw new WasSyncConflictError()
@@ -101,46 +125,43 @@ function fakePushPort(
       throw new WasSyncAuthError(404)
     }
   }
-  // A real write always acks at least the new version (the server's
-  // fallback re-read finds it even with no ETag header); `ackWrites: false`
-  // withholds only the etag, modeling a backend that exposes no `ETag`.
-  // `opaqueEtags: true` acks only the etag, modeling a validator with no
-  // parseable revision in it.
-  const bump = (revisions: Map<string, number>, id: string): WriteAck => {
-    const next = (revisions.get(id) ?? 0) + 1
-    revisions.set(id, next)
-    if (opaqueEtags) {
-      return { etag: etagFor(next) }
-    }
-    return ackWrites
-      ? { version: next, etag: etagFor(next) }
-      : { version: next }
+  // Counts this id's accepted writes and acks the validator the count names;
+  // `ackWrites: false` acks nothing, modeling a backend that exposes no `ETag`.
+  const ackNext = (
+    counts: Map<string, number>,
+    id: string,
+    validatorFor: (count: number) => string
+  ): WriteAck => {
+    const next = (counts.get(id) ?? 0) + 1
+    counts.set(id, next)
+    return ackWrites ? { etag: validatorFor(next) } : {}
   }
   return {
     writes,
     getCalls,
+    getOptions,
     async query() {
       return { documents: [], checkpoint: null }
     },
     async putContent(putOptions) {
       writes.push({ kind: 'putContent', ...putOptions })
       maybeReject('putContent', putOptions.id)
-      return bump(versions, putOptions.id)
+      return ackNext(contentWrites, putOptions.id, etagFor)
     },
     async deleteContent(deleteOptions) {
       writes.push({ kind: 'deleteContent', ...deleteOptions })
       maybeReject('deleteContent', deleteOptions.id)
       // Like the reference server: a DELETE 204 carries no ETag.
-      bump(versions, deleteOptions.id)
       return undefined
     },
     async putMeta(metaOptions) {
       writes.push({ kind: 'putMeta', ...metaOptions })
       maybeReject('putMeta', metaOptions.id)
-      return bump(metaVersions, metaOptions.id)
+      return ackNext(metaWrites, metaOptions.id, metaEtagFor)
     },
-    async get({ id }) {
-      getCalls.push(id)
+    async get(getOptionsReceived) {
+      getCalls.push(getOptionsReceived.id)
+      getOptions.push({ ...getOptionsReceived })
       if (options.getRejectsWith !== undefined) {
         throw options.getRejectsWith
       }
@@ -153,7 +174,6 @@ function newDoc(over: Partial<WithDeleted<SyncedDoc>>): WithDeleted<SyncedDoc> {
   return {
     id: 'r1',
     updatedAt: '2026-01-01T00:00:00Z',
-    version: 0,
     _deleted: false,
     ...over
   }
@@ -204,11 +224,11 @@ describe('createPushHandler routing', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
+          ...contentStamp,
           etag: etagFor(5),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ version: 5, data: { a: 2 } })
+        newDocumentState: newDoc({ ...contentStamp, data: { a: 2 } })
       }
     ])
 
@@ -224,15 +244,15 @@ describe('createPushHandler routing', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
-          metaVersion: 2,
-          metaEtag: etagFor(2),
+          ...contentStamp,
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(2),
           data: { a: 1 },
           custom: { jwe: 'old' }
         }),
         newDocumentState: newDoc({
-          version: 5,
-          metaVersion: 2,
+          ...contentStamp,
+          meta: metaStamp(),
           data: { a: 1 },
           custom: { jwe: 'new' }
         })
@@ -244,24 +264,24 @@ describe('createPushHandler routing', () => {
         kind: 'putMeta',
         id: 'r1',
         custom: { jwe: 'new' },
-        ifMatch: etagFor(2)
+        ifMatch: metaEtagFor(2)
       }
     ])
   })
 
-  it('creates metadata with If-None-Match when the primary has no metaVersion yet', async () => {
+  it('creates metadata with If-None-Match when the primary has no /meta record yet', async () => {
     const port = fakePushPort()
     const push = createPushHandler({ port })
 
     await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
+          ...contentStamp,
           etag: etagFor(5),
           data: { a: 1 }
         }),
         newDocumentState: newDoc({
-          version: 5,
+          ...contentStamp,
           data: { a: 1 },
           custom: { jwe: 'x' }
         })
@@ -282,14 +302,14 @@ describe('createPushHandler routing', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
-          metaVersion: 2,
+          ...contentStamp,
+          meta: metaStamp(),
           data: { a: 1, b: 2 },
           custom: { jwe: 'x', tag: 'y' }
         }),
         newDocumentState: newDoc({
-          version: 5,
-          metaVersion: 2,
+          ...contentStamp,
+          meta: metaStamp(),
           data: { b: 2, a: 1 },
           custom: { tag: 'y', jwe: 'x' }
         })
@@ -306,12 +326,12 @@ describe('createPushHandler routing', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 7,
+          ...contentStamp,
           etag: etagFor(7),
           data: { a: 1 }
         }),
         newDocumentState: newDoc({
-          version: 7,
+          ...contentStamp,
           _deleted: true,
           custom: { jwe: 'x' }
         })
@@ -334,15 +354,15 @@ describe('createPushHandler routing', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
-          metaVersion: 2,
-          metaEtag: etagFor(2),
+          ...contentStamp,
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(2),
           data: { a: 1 },
           custom: { jwe: 'old' }
         }),
         newDocumentState: newDoc({
-          version: 5,
-          metaVersion: 2,
+          ...contentStamp,
+          meta: metaStamp(),
           data: { a: 1 }
         })
       }
@@ -350,7 +370,7 @@ describe('createPushHandler routing', () => {
 
     expect(conflicts).toEqual([])
     expect(port.writes).toEqual([
-      { kind: 'putMeta', id: 'r1', ifMatch: etagFor(2) }
+      { kind: 'putMeta', id: 'r1', ifMatch: metaEtagFor(2) }
     ])
     expect('custom' in port.writes[0]!).toBe(false)
   })
@@ -383,11 +403,15 @@ describe('createPushHandler routing', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 5,
+          ...contentStamp,
           etag: etagFor(5),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ version: 5, data: { a: 2 }, epoch: 'e2' })
+        newDocumentState: newDoc({
+          ...contentStamp,
+          data: { a: 2 },
+          epoch: 'e2'
+        })
       }
     ])
 
@@ -403,11 +427,85 @@ describe('createPushHandler routing', () => {
   })
 })
 
+describe('createPushHandler /meta create-or-update routing', () => {
+  // The `/meta` record exists on a live assumed primary when it carries `meta`
+  // (its stamp, off the feed) or `metaEtag` (its validator, off a `204` ack
+  // that brought no stamp). Either makes the write an update, conditional only
+  // when the validator is held; neither makes it a create. A tombstone holds
+  // no live record to condition on, so it is a create whatever it carries.
+  it.each([
+    {
+      state: 'neither meta nor metaEtag',
+      assumed: { _deleted: false },
+      expected: { ifNoneMatch: true }
+    },
+    {
+      state: 'metaEtag only (after a /meta ack, before its echo)',
+      assumed: { _deleted: false, metaEtag: metaEtagFor(2) },
+      expected: { ifMatch: metaEtagFor(2) }
+    },
+    {
+      state: 'meta only (a hidden-ETag deployment)',
+      assumed: { _deleted: false, meta: metaStamp() },
+      expected: {}
+    },
+    {
+      state: 'both meta and metaEtag',
+      assumed: {
+        _deleted: false,
+        meta: metaStamp(),
+        metaEtag: metaEtagFor(2)
+      },
+      expected: { ifMatch: metaEtagFor(2) }
+    },
+    {
+      state: 'a tombstone carrying both',
+      assumed: { _deleted: true, meta: metaStamp(), metaEtag: metaEtagFor(2) },
+      expected: { ifNoneMatch: true }
+    }
+  ])(
+    'sends the /meta write for an assumed primary with $state',
+    async ({ assumed, expected }) => {
+      const port = fakePushPort()
+      const push = createPushHandler({ port })
+
+      const conflicts = await push([
+        {
+          assumedMasterState: newDoc({
+            ...contentStamp,
+            etag: etagFor(5),
+            data: { a: 1 },
+            custom: { jwe: 'old' },
+            ...assumed
+          }),
+          newDocumentState: newDoc({
+            ...contentStamp,
+            data: { a: 1 },
+            custom: { jwe: 'new' }
+          })
+        }
+      ])
+
+      expect(conflicts).toEqual([])
+      // Strict: an `ifMatch` or `ifNoneMatch` member set to `undefined` would
+      // still be sent as a precondition by a port that tests with `in`.
+      expect(port.writes.find(write => write.kind === 'putMeta')).toStrictEqual(
+        {
+          kind: 'putMeta',
+          id: 'r1',
+          custom: { jwe: 'new' },
+          ...expected
+        }
+      )
+    }
+  )
+})
+
 describe('createPushHandler conflicts', () => {
   it('re-reads and returns the primary state on a 412', async () => {
     const primary: PrimaryState = {
-      version: 9,
       updatedAt: '2026-02-02T00:00:00Z',
+      ...contentStamp,
       deleted: false,
       data: { a: 99 }
     }
@@ -422,23 +520,25 @@ describe('createPushHandler conflicts', () => {
     ])
 
     expect(port.getCalls).toEqual(['r1'])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-02-02T00:00:00Z',
-        version: 9,
+        ...contentStamp,
         data: { a: 99 },
         _deleted: false
       }
     ])
   })
 
-  it('synthesizes a tombstone conflict when the resource is now absent', async () => {
-    // The entry carries no etag and `version: 0`: the plain port's null
-    // re-read says only that no live resource is there, and no local revision
-    // stands in for the server's. Its `updatedAt` is the new local state's,
-    // not the assumed primary's. A null re-read is not drift, so the refused
-    // delete is not re-issued.
+  it('synthesizes a tombstone conflict carrying only id, updatedAt, and _deleted when the resource is now absent', async () => {
+    // The plain port's null re-read says only that no live resource is there,
+    // so the entry describes a state the driver could not read: no stamp
+    // member beyond `updatedAt`, no etag, no meta. Nothing of the assumed
+    // primary's stands in for the server's state, though it carries all of
+    // them here. Its `updatedAt` is the new local state's, not the assumed
+    // primary's. A null re-read is not drift, so the refused delete is not
+    // re-issued.
     const port = fakePushPort({
       conflictOn: { kind: 'deleteContent', id: 'r1' },
       primary: null
@@ -449,13 +549,17 @@ describe('createPushHandler conflicts', () => {
       {
         assumedMasterState: newDoc({
           updatedAt: '2025-12-31T00:00:00Z',
-          version: 4,
+          ...contentStamp,
           etag: etagFor(4),
-          data: { a: 1 }
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(1),
+          data: { a: 1 },
+          custom: { jwe: 'x' }
         }),
         newDocumentState: newDoc({
           updatedAt: '2026-01-01T00:00:00Z',
-          version: 4,
+          ...contentStamp,
+          meta: metaStamp(),
           _deleted: true
         })
       }
@@ -464,21 +568,28 @@ describe('createPushHandler conflicts', () => {
     expect(port.writes).toEqual([
       { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(4) }
     ])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 0,
         _deleted: true
       }
     ])
   })
 
-  it('carries metaVersion/custom into the assembled conflict', async () => {
+  it("carries the primary's stamp, meta, and custom verbatim into the assembled conflict, with no version", async () => {
     const primary: PrimaryState = {
-      version: 3,
-      metaVersion: 6,
       updatedAt: '2026-03-03T00:00:00Z',
+      updatedAtCounter: 0,
+      originId: 'origin-b',
+      meta: metaStamp({
+        updatedAt: '2026-03-03T00:00:00Z',
+        updatedAtCounter: 7,
+        originId: 'origin-b',
+        generation: 'gen-b'
+      }),
+      metaEtag: metaEtagFor(6),
+      etag: etagFor(3),
       deleted: false,
       data: { a: 1 },
       custom: { jwe: 'srv' }
@@ -492,33 +603,48 @@ describe('createPushHandler conflicts', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 3,
-          metaVersion: 5,
+          ...contentStamp,
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(5),
           data: { a: 1 },
           custom: { jwe: 'old' }
         }),
         newDocumentState: newDoc({
-          version: 3,
-          metaVersion: 5,
+          ...contentStamp,
+          meta: metaStamp(),
           data: { a: 1 },
           custom: { jwe: 'mine' }
         })
       }
     ])
 
-    expect(conflicts[0]).toMatchObject({
-      id: 'r1',
-      version: 3,
-      metaVersion: 6,
-      custom: { jwe: 'srv' },
-      _deleted: false
-    })
+    // `updatedAtCounter: 0` is a valid stamp (the first write in a
+    // millisecond) and is carried, not dropped as falsy.
+    expect(conflicts).toStrictEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-03-03T00:00:00Z',
+        updatedAtCounter: 0,
+        originId: 'origin-b',
+        meta: {
+          updatedAt: '2026-03-03T00:00:00Z',
+          updatedAtCounter: 7,
+          originId: 'origin-b',
+          generation: 'gen-b'
+        },
+        metaEtag: metaEtagFor(6),
+        etag: etagFor(3),
+        data: { a: 1 },
+        custom: { jwe: 'srv' },
+        _deleted: false
+      }
+    ])
   })
 
   it('carries the server-managed createdBy into the assembled conflict', async () => {
     const primary: PrimaryState = {
-      version: 9,
       updatedAt: '2026-02-02T00:00:00Z',
+      ...contentStamp,
       createdBy: 'did:key:z6MkCreator',
       data: { a: 99 }
     }
@@ -534,7 +660,6 @@ describe('createPushHandler conflicts', () => {
 
     expect(conflicts[0]).toMatchObject({
       id: 'r1',
-      version: 9,
       createdBy: 'did:key:z6MkCreator',
       _deleted: false
     })
@@ -544,8 +669,8 @@ describe('createPushHandler conflicts', () => {
     const port = fakePushPort({
       conflictOn: { kind: 'putContent', id: 'r1' },
       primary: {
-        version: 9,
         updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
         deleted: false,
         data: { a: 99 },
         epoch: 'e3'
@@ -557,7 +682,7 @@ describe('createPushHandler conflicts', () => {
       { newDocumentState: newDoc({ id: 'r1', data: { a: 1 }, epoch: 'e2' }) }
     ])
 
-    expect(conflicts[0]).toMatchObject({ id: 'r1', version: 9, epoch: 'e3' })
+    expect(conflicts[0]).toMatchObject({ id: 'r1', epoch: 'e3' })
   })
 
   it('propagates a non-conflict error so RxDB retries the batch', async () => {
@@ -585,8 +710,8 @@ describe('createPushHandler conflicts', () => {
     const port = fakePushPort({
       conflictOn: { kind: 'putContent', id: 'bad' },
       primary: {
-        version: 1,
         updatedAt: '2026-01-05T00:00:00Z',
+        ...contentStamp,
         deleted: false,
         data: { server: true }
       }
@@ -601,10 +726,54 @@ describe('createPushHandler conflicts', () => {
     expect(conflicts).toHaveLength(1)
     expect(conflicts[0]!.id).toBe('bad')
   })
+
+  it('logs the refused write with the assumed and re-read validators', async () => {
+    const port = fakePushPort({
+      conflictOn: { kind: 'putContent', id: 'r1' },
+      primary: {
+        updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        etag: etagFor(9),
+        data: { a: 99 }
+      }
+    })
+    const push = createPushHandler({ port })
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
+
+    try {
+      await push([
+        {
+          assumedMasterState: newDoc({
+            ...contentStamp,
+            etag: etagFor(4),
+            data: { a: 1 }
+          }),
+          newDocumentState: newDoc({ ...contentStamp, data: { a: 2 } })
+        }
+      ])
+
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]).toMatchObject({
+        level: 'debug',
+        msg: 'Write refused; handing the conflict entry to RxDB',
+        data: {
+          id: 'r1',
+          assumedEtag: etagFor(4),
+          etag: etagFor(9),
+          deleted: false
+        }
+      })
+      expect(capture.events[0]!.data).not.toHaveProperty('assumedVersion')
+      expect(capture.events[0]!.data).not.toHaveProperty('version')
+    } finally {
+      setLogger(previous)
+    }
+  })
 })
 
 describe('createPushHandler write acks', () => {
-  it('reports the acked content version on a create', async () => {
+  it('reports the acked content etag on a create', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -619,7 +788,7 @@ describe('createPushHandler write acks', () => {
     ])
 
     expect(conflicts).toEqual([])
-    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
   })
 
   it('echoes the acked etag verbatim as If-Match on the next update push', async () => {
@@ -632,14 +801,13 @@ describe('createPushHandler write acks', () => {
       }
     })
 
-    // Create: server acks version 1 + its etag; the caller writes it back
-    // into the row, so the next push's assumed primary carries that etag.
+    // Create: the server acks its etag; the caller writes it back into the
+    // row, so the next push's assumed primary carries that etag.
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
-    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
     const [createAck] = acks
     const writtenBack = newDoc({
       id: 'r1',
-      version: createAck!.version!,
       etag: createAck!.etag!,
       data: { a: 1 }
     })
@@ -659,10 +827,10 @@ describe('createPushHandler write acks', () => {
       data: { a: 2 },
       ifMatch: etagFor(1)
     })
-    expect(acks[1]).toEqual({ id: 'r1', version: 2, etag: etagFor(2) })
+    expect(acks[1]).toStrictEqual({ id: 'r1', etag: etagFor(2) })
   })
 
-  it('reports the acked metaVersion on a metadata write', async () => {
+  it('reports the acked metaEtag on a metadata write', async () => {
     const port = fakePushPort()
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -674,16 +842,20 @@ describe('createPushHandler write acks', () => {
 
     await push([
       {
-        assumedMasterState: newDoc({ version: 1, data: { a: 1 } }),
+        assumedMasterState: newDoc({
+          ...contentStamp,
+          etag: etagFor(1),
+          data: { a: 1 }
+        }),
         newDocumentState: newDoc({
-          version: 1,
+          ...contentStamp,
           data: { a: 1 },
           custom: { jwe: 'x' }
         })
       }
     ])
 
-    expect(acks).toEqual([{ id: 'r1', metaVersion: 1, metaEtag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', metaEtag: metaEtagFor(1) }])
   })
 
   it('does not report an ack for a delete whose response carries no ETag', async () => {
@@ -698,8 +870,8 @@ describe('createPushHandler write acks', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 1, data: { a: 1 } }),
-        newDocumentState: newDoc({ version: 1, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(1), data: { a: 1 } }),
+        newDocumentState: newDoc({ _deleted: true })
       }
     ])
 
@@ -707,10 +879,78 @@ describe('createPushHandler write acks', () => {
     expect(acks).toEqual([])
   })
 
-  it('reports the acked version with no etag when the server exposes no write ETags', async () => {
-    // A backend with no `ETag` on write responses still acks a version (the
-    // server's fallback re-read finds it), just with no validator to echo
-    // back later -- the next update push against this row sends no `If-Match`.
+  it.each([
+    {
+      acked: 'both validators',
+      contentAck: { etag: etagFor(1) },
+      metaAck: { etag: metaEtagFor(1) },
+      expected: [{ id: 'r1', etag: etagFor(1), metaEtag: metaEtagFor(1) }]
+    },
+    {
+      acked: 'the content etag alone',
+      contentAck: { etag: etagFor(1) },
+      metaAck: {},
+      expected: [{ id: 'r1', etag: etagFor(1) }]
+    },
+    {
+      acked: 'the metaEtag alone',
+      contentAck: {},
+      metaAck: { etag: metaEtagFor(1) },
+      expected: [{ id: 'r1', metaEtag: metaEtagFor(1) }]
+    },
+    {
+      acked: 'no validator (no ETag on either response)',
+      contentAck: {},
+      metaAck: {},
+      expected: []
+    }
+  ])(
+    'reports an ack carrying $acked',
+    async ({ contentAck, metaAck, expected }) => {
+      // An opaque validator alone is acked state, and a write accepted with no
+      // `ETag` in its response acks nothing: with neither validator there is
+      // no ack and no `onWriteAccepted` call, though both writes landed.
+      const port = fakePushPort()
+      port.putContent = async putOptions => {
+        port.writes.push({ kind: 'putContent', ...putOptions })
+        return contentAck
+      }
+      port.putMeta = async metaOptions => {
+        port.writes.push({ kind: 'putMeta', ...metaOptions })
+        return metaAck
+      }
+      const acks: PushWriteAck[] = []
+      const push = createPushHandler({
+        port,
+        onWriteAccepted: async ack => {
+          acks.push(ack)
+        }
+      })
+
+      const conflicts = await push([
+        {
+          newDocumentState: newDoc({
+            id: 'r1',
+            data: { a: 1 },
+            custom: { tag: 'x' }
+          })
+        }
+      ])
+
+      expect(conflicts).toEqual([])
+      expect(port.writes.map(write => write.kind)).toEqual([
+        'putContent',
+        'putMeta'
+      ])
+      // Strict: an `etag: undefined` member would read as "acked" downstream.
+      expect(acks).toStrictEqual(expected)
+    }
+  )
+
+  it('reports no ack when the server exposes no write ETags, and sends no If-Match on the next update', async () => {
+    // A backend with no readable `ETag` on write responses accepts the write
+    // and hands back no validator, so there is no acked state to write back
+    // and the row keeps the validator it had (none, for a fresh create).
     const port = fakePushPort({ ackWrites: false })
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -721,16 +961,29 @@ describe('createPushHandler write acks', () => {
     })
 
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
+    expect(acks).toEqual([])
 
-    // Strict: an `etag: undefined` member would read as "acked" downstream.
-    expect(acks).toStrictEqual([{ id: 'r1', version: 1 }])
+    const unacked = newDoc({ id: 'r1', ...contentStamp, data: { a: 1 } })
+    await push([
+      {
+        assumedMasterState: unacked,
+        newDocumentState: { ...unacked, data: { a: 2 } }
+      }
+    ])
+
+    expect(port.writes[1]).toStrictEqual({
+      kind: 'putContent',
+      id: 'r1',
+      data: { a: 2 }
+    })
+    expect(acks).toEqual([])
   })
 
-  it('reports the acked version and etag of a delete whose response carries them', async () => {
+  it('reports the acked etag of a delete whose response carries one', async () => {
     const port = fakePushPort()
     port.deleteContent = async deleteOptions => {
       port.writes.push({ kind: 'deleteContent', ...deleteOptions })
-      return { version: 8, etag: etagFor(8) }
+      return { etag: etagFor(8) }
     }
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -743,11 +996,11 @@ describe('createPushHandler write acks', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 7,
+          ...contentStamp,
           etag: etagFor(7),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ version: 7, _deleted: true })
+        newDocumentState: newDoc({ ...contentStamp, _deleted: true })
       }
     ])
 
@@ -755,11 +1008,11 @@ describe('createPushHandler write acks', () => {
     expect(port.writes).toEqual([
       { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(7) }
     ])
-    expect(acks).toStrictEqual([{ id: 'r1', version: 8, etag: etagFor(8) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(8) }])
   })
 
   it('keeps only the content ack when the metadata write resolves no ack', async () => {
-    // A `/meta` write accepted with no revision in its response (the port
+    // A `/meta` write accepted with no validator in its response (the port
     // resolves `undefined`) contributes nothing to the ack, and does not
     // discard the content half's.
     const port = fakePushPort()
@@ -790,7 +1043,7 @@ describe('createPushHandler write acks', () => {
       'putContent',
       'putMeta'
     ])
-    expect(acks).toStrictEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
   })
 
   it('propagates an onWriteAccepted rejection out of push', async () => {
@@ -811,39 +1064,12 @@ describe('createPushHandler write acks', () => {
     ])
   })
 
-  it('reports an etag-only ack when the validator carries no revision', async () => {
-    // A spec-conformant server may send an opaque `ETag` the port cannot
-    // parse a revision out of. The validator is still the acked state the
-    // next conditional write must echo, so the ack is reported without a
-    // `version`.
-    const port = fakePushPort({ opaqueEtags: true })
-    const acks: PushWriteAck[] = []
-    const push = createPushHandler({
-      port,
-      onWriteAccepted: async ack => {
-        acks.push(ack)
-      }
-    })
-
-    await push([
-      {
-        newDocumentState: newDoc({
-          id: 'r1',
-          data: { a: 1 },
-          custom: { tag: 'x' }
-        })
-      }
-    ])
-
-    expect(acks).toEqual([{ id: 'r1', etag: etagFor(1), metaEtag: etagFor(1) }])
-  })
-
   it('does not report an ack for a rejected write', async () => {
     const port = fakePushPort({
       conflictOn: { kind: 'putContent', id: 'r1' },
       primary: {
-        version: 2,
         updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
         deleted: false,
         data: { a: 9 }
       }
@@ -865,16 +1091,16 @@ describe('createPushHandler write acks', () => {
   })
 
   it('keeps the content ack when the following metadata write 412s', async () => {
-    // The content half was ACCEPTED (the server holds the new version) before
+    // The content half was ACCEPTED (the server holds the new content) before
     // the /meta half conflicted. Discarding that ack would leave the local row
-    // one revision behind and 412 on every later conditional write, so the
-    // conflict and the ack are reported together.
+    // holding the pre-write validator and 412 on every later conditional
+    // write, so the conflict and the ack are reported together.
     const port = fakePushPort({
       conflictOn: { kind: 'putMeta', id: 'r1' },
       primary: {
-        version: 1,
-        metaVersion: 4,
         updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        meta: metaStamp(),
         deleted: false,
         data: { a: 2 },
         custom: { jwe: 'srv' }
@@ -890,9 +1116,8 @@ describe('createPushHandler write acks', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({ data: { a: 1 } }),
         newDocumentState: newDoc({
-          version: 0,
           data: { a: 2 },
           custom: { jwe: 'mine' }
         })
@@ -904,7 +1129,7 @@ describe('createPushHandler write acks', () => {
       'putMeta'
     ])
     expect(conflicts).toHaveLength(1)
-    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
   })
 })
 
@@ -928,12 +1153,12 @@ describe('createPushHandler tombstoned assumed primary', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 2,
+          ...contentStamp,
           etag: etagFor(2),
           _deleted: true
         }),
         newDocumentState: newDoc({
-          version: 1,
+          ...contentStamp,
           etag: etagFor(1),
           data: { a: 2 }
         })
@@ -945,19 +1170,19 @@ describe('createPushHandler tombstoned assumed primary', () => {
       { kind: 'putContent', id: 'r1', data: { a: 2 }, ifNoneMatch: true }
     ])
     expect(port.getCalls).toEqual([])
-    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
   })
 
   it('re-creates a tombstone conflict entry that carries no etag', async () => {
-    // The entry the plain port's null re-read produces: `version: 0`, no etag.
+    // The entry the plain port's null re-read produces: `id`, `updatedAt`,
+    // and `_deleted` only.
     const port = fakePushPort()
     const push = createPushHandler({ port })
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, _deleted: true }),
+        assumedMasterState: newDoc({ _deleted: true }),
         newDocumentState: newDoc({
-          version: 1,
           etag: etagFor(1),
           data: { a: 2 }
         })
@@ -977,11 +1202,11 @@ describe('createPushHandler tombstoned assumed primary', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 2,
+          ...contentStamp,
           etag: etagFor(2),
           _deleted: true
         }),
-        newDocumentState: newDoc({ version: 2, _deleted: true })
+        newDocumentState: newDoc({ ...contentStamp, _deleted: true })
       }
     ])
 
@@ -1011,9 +1236,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({ data: { a: 1 } }),
         newDocumentState: newDoc({
-          version: 0,
           data: { a: 2 },
           custom: { jwe: 'mine' }
         })
@@ -1021,23 +1245,22 @@ describe('createPushHandler metadata 404 corroboration', () => {
     ])
 
     expect(port.getCalls).toEqual(['r1'])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 0,
         _deleted: true
       }
     ])
-    expect(acks).toEqual([{ id: 'r1', version: 1, etag: etagFor(1) }])
+    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
   })
 
   it('resolves as a conflict when the re-read primary is already a tombstone', async () => {
     const port = fakePushPort({
       auth404On: { kind: 'putMeta', id: 'r1' },
       primary: {
-        version: 8,
         updatedAt: '2026-03-03T00:00:00Z',
+        ...contentStamp,
         deleted: true
       }
     })
@@ -1045,20 +1268,21 @@ describe('createPushHandler metadata 404 corroboration', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({ data: { a: 1 } }),
         newDocumentState: newDoc({
-          version: 0,
           data: { a: 1 },
           custom: { jwe: 'mine' }
         })
       }
     ])
 
-    expect(conflicts).toEqual([
+    // A feed tombstone is stamped like any other feed document, and its stamp
+    // is carried into the entry.
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-03-03T00:00:00Z',
-        version: 8,
+        ...contentStamp,
         _deleted: true
       }
     ])
@@ -1076,9 +1300,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
     await expect(
       push([
         {
-          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+          assumedMasterState: newDoc({ data: { a: 1 } }),
           newDocumentState: newDoc({
-            version: 0,
             data: { a: 1 },
             custom: { jwe: 'mine' }
           })
@@ -1101,9 +1324,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
     await expect(
       push([
         {
-          assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+          assumedMasterState: newDoc({ data: { a: 1 } }),
           newDocumentState: newDoc({
-            version: 0,
             data: { a: 1 },
             custom: { jwe: 'mine' }
           })
@@ -1135,32 +1357,31 @@ describe('createPushHandler metadata 404 corroboration', () => {
       {
         assumedMasterState: newDoc({
           updatedAt: '2025-12-31T00:00:00Z',
-          version: 3,
+          ...contentStamp,
           etag: etagFor(3),
           data: { a: 1 },
           custom: { jwe: 'theirs' },
-          metaVersion: 1,
-          metaEtag: etagFor(1)
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(1)
         }),
         newDocumentState: newDoc({
           updatedAt: '2026-01-01T00:00:00Z',
-          version: 3,
+          ...contentStamp,
           etag: etagFor(3),
           data: { a: 1 },
           custom: { jwe: 'mine' },
-          metaVersion: 1,
-          metaEtag: etagFor(1)
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(1)
         })
       }
     ])
 
     expect(port.writes.map(write => write.kind)).toEqual(['putMeta'])
     expect(port.getCalls).toEqual(['r1'])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 0,
         _deleted: true
       }
     ])
@@ -1186,8 +1407,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
       const port = fakePushPort({
         [portShape]: { kind: 'putMeta', id: 'r1' },
         primary: {
-          version: 3,
           updatedAt: '2026-03-03T00:00:00Z',
+          ...contentStamp,
           deleted: false,
           data: { a: 1 }
         }
@@ -1197,9 +1418,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
       await expect(
         push([
           {
-            assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+            assumedMasterState: newDoc({ data: { a: 1 } }),
             newDocumentState: newDoc({
-              version: 0,
               data: { a: 1 },
               custom: { jwe: 'mine' }
             })
@@ -1212,19 +1432,33 @@ describe('createPushHandler metadata 404 corroboration', () => {
 })
 
 /**
+ * A deterministic content etag for one feed resource at one stamp counter.
+ *
+ * @param id {string}
+ * @param counter {number}
+ * @returns {string}
+ */
+function feedEtag(id: string, counter: number): string {
+  return `"etag-${id}-${counter}"`
+}
+
+/**
  * A fake base port over an in-memory changes feed, served whole as one page.
- * `putContent` bumps the doc's feed `version` (so a re-read sees what an
- * accepted write produced) unless the id is in `conflictContent`; `putMeta`
- * conflicts for an id in `conflictMeta`. A `putContent` for an id in
- * `holdContent` waits until a feed walk has read the feed, so the write lands
- * after that walk memoized the pre-write state. `queryCalls` counts feed walks
- * -- what the batch's shared primary-read memo is meant to keep to one.
+ * `putContent` advances the doc's feed stamp counter and etag (so a re-read
+ * sees what an accepted write produced) unless the id is in `conflictContent`;
+ * its ack carries the new etag unless `hideContentEtag` is set, which models a
+ * write response with no readable `ETag`. `putMeta` conflicts for an id in
+ * `conflictMeta`. A `putContent` for an id in `holdContent` waits until a feed
+ * walk has read the feed, so the write lands after that walk memoized the
+ * pre-write state. `queryCalls` counts feed walks -- what the batch's shared
+ * primary-read memo is meant to keep to one.
  */
 function fakeFeedBase(options: {
   feed: WireDoc[]
   conflictContent?: string[]
   conflictMeta?: string[]
   holdContent?: string[]
+  hideContentEtag?: boolean
 }): WasSyncBasePort & { queryCalls: number } {
   const state = { queryCalls: 0 }
   const documents = new Map(options.feed.map(doc => [doc.id, { ...doc }]))
@@ -1250,16 +1484,16 @@ function fakeFeedBase(options: {
         throw new WasSyncConflictError()
       }
       const current = documents.get(id)
-      const version = (current?.version ?? 0) + 1
+      const updatedAtCounter = (current?.updatedAtCounter ?? 0) + 1
+      const etag = feedEtag(id, updatedAtCounter)
       documents.set(id, {
-        id,
-        _deleted: false,
-        updatedAt: current?.updatedAt ?? '2026-01-01T00:00:00Z',
-        version,
-        checkpoint: `cp-${id}-${version}`,
+        ...feedDoc(id, updatedAtCounter),
+        ...(current?.updatedAt !== undefined && {
+          updatedAt: current.updatedAt
+        }),
         data
       })
-      return { version }
+      return options.hideContentEtag === true ? {} : { etag }
     },
     async deleteContent() {
       return undefined
@@ -1268,19 +1502,19 @@ function fakeFeedBase(options: {
       if (options.conflictMeta?.includes(id)) {
         throw new WasSyncConflictError()
       }
-      return { version: 1 }
+      return { etag: metaEtagFor(1) }
     }
   }
 }
 
-function feedDoc(id: string, version: number): WireDoc {
-  return {
+function feedDoc(id: string, counter: number): WireDoc {
+  return wire({
     id,
-    _deleted: false,
     updatedAt: '2026-02-02T00:00:00Z',
-    version,
-    checkpoint: `cp-${id}-${version}`
-  }
+    updatedAtCounter: counter,
+    etag: feedEtag(id, counter),
+    checkpoint: `cp-${id}-${counter}`
+  })
 }
 
 describe('createPushHandler batch primary re-reads', () => {
@@ -1296,60 +1530,129 @@ describe('createPushHandler batch primary re-reads', () => {
       { newDocumentState: newDoc({ id: 'r2', data: { b: 1 } }) }
     ])
 
-    expect(conflicts.map(conflict => [conflict.id, conflict.version])).toEqual([
-      ['r1', 9],
-      ['r2', 4]
+    expect(conflicts.map(conflict => [conflict.id, conflict.etag])).toEqual([
+      ['r1', feedEtag('r1', 9)],
+      ['r2', feedEtag('r2', 4)]
     ])
     // One walk for the batch, not one per conflicting row.
     expect(base.queryCalls).toBe(1)
   })
 
-  it("reports the version a row's own accepted write produced", async () => {
-    // r1 conflicts and walks the feed, memoizing every row it pages past. r2's
-    // content write is held until that walk has read the feed, so the memo
-    // holds r2 at its pre-write version 4. The write is then accepted (version
-    // 5) and only r2's `/meta` write conflicts, so its conflict entry must
-    // carry the version that write just produced -- never the memo's
-    // pre-write state (which is why such a row skips the memo).
-    const base = fakeFeedBase({
-      feed: [feedDoc('r1', 9), feedDoc('r2', 4)],
-      conflictContent: ['r1'],
-      conflictMeta: ['r2'],
-      holdContent: ['r2']
-    })
-    const push = createPushHandler({ port: withFeedPrimaryRead(base) })
+  it.each([
+    { response: 'carries its ETag', hideContentEtag: false },
+    { response: 'carries no ETag', hideContentEtag: true }
+  ])(
+    "reports the state a row's own accepted write produced when its response $response",
+    async ({ hideContentEtag }) => {
+      // r1 conflicts and walks the feed, memoizing every row it pages past.
+      // r2's content write is held until that walk has read the feed, so the
+      // memo holds r2 at its pre-write stamp (counter 4). The write is then
+      // accepted (counter 5) and only r2's `/meta` write conflicts, so its
+      // conflict entry must carry the state that write just produced, never
+      // the memo's pre-write state (which is why such a row skips the memo).
+      // The bypass keys on the accepted write, not on an acked validator, so a
+      // response with no `ETag` re-reads fresh too.
+      const base = fakeFeedBase({
+        feed: [feedDoc('r1', 9), feedDoc('r2', 4)],
+        conflictContent: ['r1'],
+        conflictMeta: ['r2'],
+        holdContent: ['r2'],
+        hideContentEtag
+      })
+      const push = createPushHandler({ port: withFeedPrimaryRead(base) })
 
-    const conflicts = await push([
-      { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) },
+      const conflicts = await push([
+        { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) },
+        {
+          newDocumentState: newDoc({
+            id: 'r2',
+            data: { b: 1 },
+            custom: { c: 1 }
+          })
+        }
+      ])
+
+      expect(
+        conflicts.map(conflict => [
+          conflict.id,
+          conflict.updatedAtCounter,
+          conflict.etag
+        ])
+      ).toEqual([
+        ['r1', 9, feedEtag('r1', 9)],
+        ['r2', 5, feedEtag('r2', 5)]
+      ])
+    }
+  )
+
+  it('bypasses the batch memo after a hidden-ETag content write although no validator was acked', async () => {
+    // The content write is accepted with no `ETag`, so `hasAck` is false, yet
+    // the row has written this batch: the `/meta` 412's re-read must not be
+    // served from the memo. A row that wrote nothing (its content write 412s)
+    // is what the memo is for, and gets it.
+    const primary: PrimaryState = {
+      updatedAt: '2026-02-02T00:00:00Z',
+      ...contentStamp,
+      deleted: false,
+      data: { a: 2 },
+      custom: { jwe: 'srv' }
+    }
+    const hidden = fakePushPort({
+      ackWrites: false,
+      conflictOn: { kind: 'putMeta', id: 'r1' },
+      primary
+    })
+    const acks: PushWriteAck[] = []
+    const hiddenConflicts = await createPushHandler({
+      port: hidden,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })([
       {
         newDocumentState: newDoc({
-          id: 'r2',
-          data: { b: 1 },
-          custom: { c: 1 }
+          id: 'r1',
+          data: { a: 2 },
+          custom: { jwe: 'mine' }
         })
       }
     ])
 
-    expect(conflicts.map(conflict => [conflict.id, conflict.version])).toEqual([
-      ['r1', 9],
-      ['r2', 5]
+    expect(hidden.writes.map(write => write.kind)).toEqual([
+      'putContent',
+      'putMeta'
     ])
+    expect(hiddenConflicts).toHaveLength(1)
+    expect(acks).toEqual([])
+    expect(hidden.getOptions).toStrictEqual([{ id: 'r1' }])
+
+    const unwritten = fakePushPort({
+      ackWrites: false,
+      conflictOn: { kind: 'putContent', id: 'r1' },
+      primary
+    })
+    await createPushHandler({ port: unwritten })([
+      { newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }
+    ])
+
+    expect(unwritten.getOptions).toHaveLength(1)
+    expect(unwritten.getOptions[0]!.cache).toBeDefined()
   })
 })
 
 describe('createPushHandler benign delete retry', () => {
   /**
-   * A port whose delete is conditional on the revision the server really holds:
-   * a stale `If-Match` is refused with a `412`, and `get` answers the current
-   * primary. This is the drift a locally created row sees before its own write
-   * is acked or echoes back on a pull.
+   * A port whose delete is conditional on the validator the server really
+   * holds: a stale `If-Match` is refused with a `412`, and `get` answers the
+   * current primary. This is the drift a locally created row sees before its
+   * own write is acked or echoes back on a pull.
    */
   function driftingDeletePort({
-    serverVersion,
+    serverEtag,
     serverData,
     serverWriterId
   }: {
-    serverVersion: number
+    serverEtag: string
     serverData: unknown
     serverWriterId?: string
   }): WasSyncPort & { deletes: Array<string | undefined> } {
@@ -1360,11 +1663,11 @@ describe('createPushHandler benign delete retry', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return { version: serverVersion }
+        return { etag: serverEtag }
       },
       async deleteContent({ ifMatch }) {
         deletes.push(ifMatch)
-        if (ifMatch !== etagFor(serverVersion)) {
+        if (ifMatch !== serverEtag) {
           throw new WasSyncConflictError()
         }
         return undefined
@@ -1374,9 +1677,9 @@ describe('createPushHandler benign delete retry', () => {
       },
       async get() {
         return {
-          version: serverVersion,
-          etag: etagFor(serverVersion),
+          etag: serverEtag,
           updatedAt: '2026-02-02T00:00:00Z',
+          ...contentStamp,
           data: serverData as never,
           ...(serverWriterId !== undefined && { writerId: serverWriterId })
         }
@@ -1385,10 +1688,13 @@ describe('createPushHandler benign delete retry', () => {
   }
 
   it('re-issues a 412-refused delete against the current ETag when the body is unchanged', async () => {
-    // The locally assumed revision lags the server's (our own create has not
+    // The locally assumed validator lags the server's (our own create has not
     // echoed back yet), so the first conditional delete is refused. The body is
-    // the same content under a drifted revision, so the delete is re-issued.
-    const port = driftingDeletePort({ serverVersion: 1, serverData: { a: 1 } })
+    // the same content under a drifted validator, so the delete is re-issued.
+    const port = driftingDeletePort({
+      serverEtag: etagFor(1),
+      serverData: { a: 1 }
+    })
     const push = createPushHandler({ port })
     const capture = captureLogger('sync')
     const previous = setLogger(capture.logger)
@@ -1396,12 +1702,8 @@ describe('createPushHandler benign delete retry', () => {
     try {
       const conflicts = await push([
         {
-          assumedMasterState: newDoc({
-            version: 0,
-            etag: etagFor(0),
-            data: { a: 1 }
-          }),
-          newDocumentState: newDoc({ version: 0, _deleted: true })
+          assumedMasterState: newDoc({ etag: etagFor(0), data: { a: 1 } }),
+          newDocumentState: newDoc({ _deleted: true })
         }
       ])
 
@@ -1412,8 +1714,11 @@ describe('createPushHandler benign delete retry', () => {
       expect(capture.events).toHaveLength(1)
       expect(capture.events[0]).toMatchObject({
         level: 'debug',
-        data: { id: 'r1', assumedVersion: 0, version: 1 }
+        msg: 'Delete refused on a drifted validator; re-issuing it',
+        data: { id: 'r1', assumedEtag: etagFor(0), etag: etagFor(1) }
       })
+      expect(capture.events[0]!.data).not.toHaveProperty('assumedVersion')
+      expect(capture.events[0]!.data).not.toHaveProperty('version')
     } finally {
       setLogger(previous)
     }
@@ -1424,7 +1729,7 @@ describe('createPushHandler benign delete retry', () => {
     // body with a different key order does not defeat the retry and leave a
     // retracted resource live on the server.
     const port = driftingDeletePort({
-      serverVersion: 1,
+      serverEtag: etagFor(1),
       serverData: { b: { d: 3, c: 2 }, a: 1 }
     })
     const push = createPushHandler({ port })
@@ -1432,11 +1737,10 @@ describe('createPushHandler benign delete retry', () => {
     const conflicts = await push([
       {
         assumedMasterState: newDoc({
-          version: 0,
           etag: etagFor(0),
           data: { a: 1, b: { c: 2, d: 3 } }
         }),
-        newDocumentState: newDoc({ version: 0, _deleted: true })
+        newDocumentState: newDoc({ _deleted: true })
       }
     ])
 
@@ -1446,8 +1750,9 @@ describe('createPushHandler benign delete retry', () => {
 
   it('reports a conflict when a 412-refused delete finds a changed body', async () => {
     const primary: PrimaryState = {
-      version: 1,
       updatedAt: '2026-02-02T00:00:00Z',
+      ...contentStamp,
+      etag: etagFor(1),
       data: { a: 99 }
     }
     const port = fakePushPort({
@@ -1458,12 +1763,8 @@ describe('createPushHandler benign delete retry', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          version: 0,
-          etag: etagFor(0),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 0, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(0), data: { a: 1 } }),
+        newDocumentState: newDoc({ _deleted: true })
       }
     ])
 
@@ -1471,11 +1772,12 @@ describe('createPushHandler benign delete retry', () => {
     expect(port.writes).toEqual([
       { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(0) }
     ])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-02-02T00:00:00Z',
-        version: 1,
+        ...contentStamp,
+        etag: etagFor(1),
         data: { a: 99 },
         _deleted: false
       }
@@ -1485,9 +1787,9 @@ describe('createPushHandler benign delete retry', () => {
   it("reports a conflict when the equal body is under another writer's label", async () => {
     // Delete-then-recreate by another writer: on a content-addressed row the
     // re-created body reads back equal, so only the label tells it apart from
-    // this replica's own revision drift. The delete is not re-issued.
+    // this replica's own validator drift. The delete is not re-issued.
     const port = driftingDeletePort({
-      serverVersion: 3,
+      serverEtag: etagFor(3),
       serverData: { a: 1 },
       serverWriterId: 'writer-b'
     })
@@ -1495,21 +1797,17 @@ describe('createPushHandler benign delete retry', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          version: 1,
-          etag: etagFor(1),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 1, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(1), data: { a: 1 } }),
+        newDocumentState: newDoc({ _deleted: true })
       }
     ])
 
     expect(port.deletes).toEqual([etagFor(1)])
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-02-02T00:00:00Z',
-        version: 3,
+        ...contentStamp,
         etag: etagFor(3),
         data: { a: 1 },
         _deleted: false
@@ -1519,7 +1817,7 @@ describe('createPushHandler benign delete retry', () => {
 
   it('re-issues the delete when the equal body is under its own label', async () => {
     const port = driftingDeletePort({
-      serverVersion: 1,
+      serverEtag: etagFor(1),
       serverData: { a: 1 },
       serverWriterId: 'writer-a'
     })
@@ -1527,12 +1825,8 @@ describe('createPushHandler benign delete retry', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          version: 0,
-          etag: etagFor(0),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 0, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(0), data: { a: 1 } }),
+        newDocumentState: newDoc({ _deleted: true })
       }
     ])
 
@@ -1543,38 +1837,30 @@ describe('createPushHandler benign delete retry', () => {
   it('falls back to body equality when either side carries no label', async () => {
     // No label injected here, a label on the server: equality decides.
     const unlabeledReplica = driftingDeletePort({
-      serverVersion: 1,
+      serverEtag: etagFor(1),
       serverData: { a: 1 },
       serverWriterId: 'writer-b'
     })
     expect(
       await createPushHandler({ port: unlabeledReplica })([
         {
-          assumedMasterState: newDoc({
-            version: 0,
-            etag: etagFor(0),
-            data: { a: 1 }
-          }),
-          newDocumentState: newDoc({ version: 0, _deleted: true })
+          assumedMasterState: newDoc({ etag: etagFor(0), data: { a: 1 } }),
+          newDocumentState: newDoc({ _deleted: true })
         }
       ])
     ).toEqual([])
     expect(unlabeledReplica.deletes).toEqual([etagFor(0), etagFor(1)])
 
-    // A label injected here, none recorded on the server's revision.
+    // A label injected here, none recorded on the server's record.
     const unlabeledServer = driftingDeletePort({
-      serverVersion: 1,
+      serverEtag: etagFor(1),
       serverData: { a: 1 }
     })
     expect(
       await createPushHandler({ port: unlabeledServer, writerId: 'writer-a' })([
         {
-          assumedMasterState: newDoc({
-            version: 0,
-            etag: etagFor(0),
-            data: { a: 1 }
-          }),
-          newDocumentState: newDoc({ version: 0, _deleted: true })
+          assumedMasterState: newDoc({ etag: etagFor(0), data: { a: 1 } }),
+          newDocumentState: newDoc({ _deleted: true })
         }
       ])
     ).toEqual([])
@@ -1591,7 +1877,11 @@ describe('createPushHandler benign delete retry', () => {
     const capture = captureLogger('sync')
     const previous = setLogger(capture.logger)
     const port = fakePushPort({
-      primary: { version: 2, updatedAt: '2026-02-02T00:00:00Z', data: { a: 1 } }
+      primary: {
+        updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        data: { a: 1 }
+      }
     })
     const acks: PushWriteAck[] = []
     const push = createPushHandler({
@@ -1617,7 +1907,7 @@ describe('createPushHandler benign delete retry', () => {
         }
       ])
       expect(port.getCalls).toEqual([])
-      expect(acks).toEqual([{ id: 'sibling', version: 1, etag: etagFor(1) }])
+      expect(acks).toStrictEqual([{ id: 'sibling', etag: etagFor(1) }])
       // The skip is a swallow point the seam makes visible, at debug.
       expect(capture.events).toHaveLength(1)
       expect(capture.events[0]).toMatchObject({
@@ -1653,13 +1943,13 @@ describe('createPushHandler delete of an absent resource', () => {
       {
         assumedMasterState: newDoc({
           id: 'gone-remotely',
-          version: 2,
+          ...contentStamp,
           etag: etagFor(2),
           data: { a: 1 }
         }),
         newDocumentState: newDoc({
           id: 'gone-remotely',
-          version: 2,
+          ...contentStamp,
           _deleted: true
         })
       },
@@ -1678,13 +1968,13 @@ describe('createPushHandler delete of an absent resource', () => {
     ])
     // Already gone is the goal state, not a conflict: nothing is re-read.
     expect(port.getCalls).toEqual([])
-    // No revision is acked for the absent row; the sibling's create is.
-    expect(acks).toEqual([{ id: 'sibling', version: 1, etag: etagFor(1) }])
+    // No validator is acked for the absent row; the sibling's create is.
+    expect(acks).toStrictEqual([{ id: 'sibling', etag: etagFor(1) }])
   })
 
   it('treats a not-found on the benign-412 re-issued delete as already gone', async () => {
-    // The stale-revision delete 412s, the re-read shows the same body, and the
-    // resource vanishes between the re-read and the retry (a delete/delete
+    // The stale-validator delete 412s, the re-read shows the same body, and
+    // the resource vanishes between the re-read and the retry (a delete/delete
     // race). The retry's 404 is the goal state, not an error.
     const deletes: Array<string | undefined> = []
     const port: WasSyncPort = {
@@ -1692,7 +1982,7 @@ describe('createPushHandler delete of an absent resource', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return { version: 0 } // never invoked on this delete-only push
+        return {} // never invoked on this delete-only push
       },
       async deleteContent({ ifMatch }) {
         deletes.push(ifMatch)
@@ -1706,9 +1996,9 @@ describe('createPushHandler delete of an absent resource', () => {
       },
       async get() {
         return {
-          version: 5,
           etag: etagFor(5),
           updatedAt: '2026-02-02T00:00:00Z',
+          ...contentStamp,
           data: { a: 1 } as never
         }
       }
@@ -1717,12 +2007,8 @@ describe('createPushHandler delete of an absent resource', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          version: 1,
-          etag: etagFor(1),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 1, data: { a: 1 }, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(1), data: { a: 1 } }),
+        newDocumentState: newDoc({ data: { a: 1 }, _deleted: true })
       }
     ])
 
@@ -1744,11 +2030,10 @@ describe('createPushHandler delete of an absent resource', () => {
       {
         assumedMasterState: newDoc({
           id: 'gone',
-          version: 1,
           etag: etagFor(1),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ id: 'gone', version: 1, _deleted: true })
+        newDocumentState: newDoc({ id: 'gone', _deleted: true })
       }
     ])
 
@@ -1768,8 +2053,8 @@ describe('createPushHandler delete of an absent resource', () => {
     await expect(
       push([
         {
-          assumedMasterState: newDoc({ version: 1, etag: etagFor(1) }),
-          newDocumentState: newDoc({ version: 1, _deleted: true })
+          assumedMasterState: newDoc({ etag: etagFor(1) }),
+          newDocumentState: newDoc({ _deleted: true })
         }
       ])
     ).rejects.toThrow('network down')
@@ -1809,8 +2094,8 @@ describe('createPushHandler typed signals from another copy', () => {
       },
       async get() {
         return {
-          version: 9,
           updatedAt: '2026-02-02T00:00:00Z',
+          ...contentStamp,
           data: { a: 99 } as never
         }
       }
@@ -1821,11 +2106,11 @@ describe('createPushHandler typed signals from another copy', () => {
       { newDocumentState: newDoc({ data: { a: 1 } }) }
     ])
 
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-02-02T00:00:00Z',
-        version: 9,
+        ...contentStamp,
         data: { a: 99 },
         _deleted: false
       }
@@ -1838,7 +2123,7 @@ describe('createPushHandler typed signals from another copy', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return { version: 1 }
+        return { etag: etagFor(1) }
       },
       async deleteContent() {
         return undefined
@@ -1854,9 +2139,8 @@ describe('createPushHandler typed signals from another copy', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({ version: 0, data: { a: 1 } }),
+        assumedMasterState: newDoc({ data: { a: 1 } }),
         newDocumentState: newDoc({
-          version: 0,
           data: { a: 2 },
           custom: { jwe: 'mine' }
         })
@@ -1865,11 +2149,10 @@ describe('createPushHandler typed signals from another copy', () => {
 
     // The re-read says the resource is gone: an ordinary delete race, reported
     // as a tombstone conflict rather than escalating to "access expired".
-    expect(conflicts).toEqual([
+    expect(conflicts).toStrictEqual([
       {
         id: 'r1',
         updatedAt: '2026-01-01T00:00:00Z',
-        version: 0,
         _deleted: true
       }
     ])
@@ -1918,14 +2201,18 @@ describe('createPushHandler writer attribution', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 2,
+          ...contentStamp,
           etag: etagFor(2),
           data: { a: 1 },
-          metaVersion: 1,
-          metaEtag: etagFor(1),
+          meta: metaStamp(),
+          metaEtag: metaEtagFor(1),
           custom: { jwe: 'x' }
         }),
-        newDocumentState: newDoc({ version: 2, data: { a: 2 } })
+        newDocumentState: newDoc({
+          ...contentStamp,
+          meta: metaStamp(),
+          data: { a: 2 }
+        })
       }
     ])
 
@@ -1937,7 +2224,7 @@ describe('createPushHandler writer attribution', () => {
         ifMatch: etagFor(2),
         writerId
       },
-      { kind: 'putMeta', id: 'r1', ifMatch: etagFor(1), writerId }
+      { kind: 'putMeta', id: 'r1', ifMatch: metaEtagFor(1), writerId }
     ])
   })
 
@@ -1948,11 +2235,15 @@ describe('createPushHandler writer attribution', () => {
     await push([
       {
         assumedMasterState: newDoc({
-          version: 3,
+          ...contentStamp,
           etag: etagFor(3),
           data: { a: 1 }
         }),
-        newDocumentState: newDoc({ version: 3, data: { a: 1 }, _deleted: true })
+        newDocumentState: newDoc({
+          ...contentStamp,
+          data: { a: 1 },
+          _deleted: true
+        })
       }
     ])
 
@@ -1968,7 +2259,7 @@ describe('createPushHandler writer attribution', () => {
         return { documents: [], checkpoint: null }
       },
       async putContent() {
-        return { version: 1 }
+        return { etag: etagFor(1) }
       },
       async deleteContent({ ifMatch, writerId: declared }) {
         deletes.push({ ifMatch, writerId: declared })
@@ -1982,9 +2273,9 @@ describe('createPushHandler writer attribution', () => {
       },
       async get() {
         return {
-          version: 2,
           etag: etagFor(2),
           updatedAt: '2026-02-02T00:00:00Z',
+          ...contentStamp,
           data: { a: 1 }
         }
       }
@@ -1993,12 +2284,8 @@ describe('createPushHandler writer attribution', () => {
 
     const conflicts = await push([
       {
-        assumedMasterState: newDoc({
-          version: 1,
-          etag: etagFor(1),
-          data: { a: 1 }
-        }),
-        newDocumentState: newDoc({ version: 1, data: { a: 1 }, _deleted: true })
+        assumedMasterState: newDoc({ etag: etagFor(1), data: { a: 1 } }),
+        newDocumentState: newDoc({ data: { a: 1 }, _deleted: true })
       }
     ])
 
@@ -2024,13 +2311,11 @@ describe('createPushHandler writer attribution', () => {
       {
         assumedMasterState: newDoc({
           id: 'r2',
-          version: 1,
           etag: etagFor(1),
           data: { b: 1 }
         }),
         newDocumentState: newDoc({
           id: 'r2',
-          version: 1,
           data: { b: 1 },
           _deleted: true
         })

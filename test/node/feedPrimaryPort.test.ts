@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { withFeedPrimaryRead } from '../../src/feedPrimaryPort.js'
+import { wire } from './fixtures.js'
 import type {
   PrimaryReadCache,
   SyncCheckpoint,
@@ -90,7 +91,7 @@ function fakeBasePort(
       return { documents, checkpoint: last?.checkpoint ?? null }
     },
     async putContent() {
-      return { version: 0 } // unused here; get() is what this suite exercises
+      return {} // unused here; get() is what this suite exercises
     },
     async deleteContent() {
       return undefined
@@ -101,23 +102,13 @@ function fakeBasePort(
   }
 }
 
-function wire(over: Partial<WireDoc> & { id: string }): WireDoc {
-  return {
-    _deleted: false,
-    updatedAt: '2026-01-01T00:00:00Z',
-    version: 1,
-    checkpoint: `cp-${over.id}`,
-    ...over
-  }
-}
-
 describe('withFeedPrimaryRead get', () => {
   it('resolves the primary state from the feed body when the resource is found', async () => {
     const base = fakeBasePort({
       pages: [
         [
-          wire({ id: 'other', version: 4 }),
-          wire({ id: 'r1', version: 7, data: { a: 1 }, metaVersion: 2 })
+          wire({ id: 'other', updatedAtCounter: 4 }),
+          wire({ id: 'r1', updatedAtCounter: 7, data: { a: 1 } })
         ]
       ]
     })
@@ -126,14 +117,45 @@ describe('withFeedPrimaryRead get', () => {
     const primary = await port.get({ id: 'r1' })
 
     expect(primary).toStrictEqual({
-      version: 7,
       updatedAt: '2026-01-01T00:00:00Z',
+      updatedAtCounter: 7,
+      originId: 'origin-a',
       deleted: false,
-      data: { a: 1 },
-      metaVersion: 2
+      data: { a: 1 }
     })
-    // The feed doc declared no writer label, so the key is absent outright.
+    // The feed doc declared no writer label and no meta, so both keys are
+    // absent outright, and no revision number is minted.
     expect('writerId' in primary!).toBe(false)
+    expect('meta' in primary!).toBe(false)
+    expect('version' in primary!).toBe(false)
+  })
+
+  it('carries a zero updatedAtCounter and the originId into the primary state', async () => {
+    const base = fakeBasePort({
+      pages: [[wire({ id: 'r1', updatedAtCounter: 0, originId: 'origin-z' })]]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    expect(await port.get({ id: 'r1' })).toMatchObject({
+      updatedAtCounter: 0,
+      originId: 'origin-z'
+    })
+  })
+
+  it('carries the nested meta stamp verbatim into the primary state', async () => {
+    const meta = {
+      updatedAt: '2026-01-01T00:00:05Z',
+      updatedAtCounter: 0,
+      originId: 'origin-b',
+      generation: 'gen-1'
+    }
+    const base = fakeBasePort({
+      pages: [[wire({ id: 'r1', data: { a: 1 }, meta })]]
+    })
+    const port = withFeedPrimaryRead(base)
+
+    const primary = await port.get({ id: 'r1' })
+    expect(primary!.meta).toStrictEqual(meta)
   })
 
   it('follows the checkpoint chain to a resource on a later page', async () => {
@@ -141,12 +163,12 @@ describe('withFeedPrimaryRead get', () => {
       pages: [
         [wire({ id: 'a' }), wire({ id: 'b' })],
         [wire({ id: 'c' }), wire({ id: 'd' })],
-        [wire({ id: 'r1', version: 7 }), wire({ id: 'e' })]
+        [wire({ id: 'r1', updatedAtCounter: 7 }), wire({ id: 'e' })]
       ]
     })
     const port = withFeedPrimaryRead(base)
 
-    expect(await port.get({ id: 'r1' })).toMatchObject({ version: 7 })
+    expect(await port.get({ id: 'r1' })).toMatchObject({ updatedAtCounter: 7 })
     // Each page resumes from the checkpoint the previous page reported; the
     // first page sends none at all.
     expect(base.queries).toStrictEqual([
@@ -189,12 +211,14 @@ describe('withFeedPrimaryRead get', () => {
 
   it('carries the key epoch stamp into the primary state', async () => {
     const base = fakeBasePort({
-      pages: [[wire({ id: 'r1', version: 7, data: { a: 1 }, epoch: 'e3' })]]
+      pages: [
+        [wire({ id: 'r1', updatedAtCounter: 7, data: { a: 1 }, epoch: 'e3' })]
+      ]
     })
     const port = withFeedPrimaryRead(base)
 
     expect(await port.get({ id: 'r1' })).toMatchObject({
-      version: 7,
+      updatedAtCounter: 7,
       epoch: 'e3'
     })
   })
@@ -202,13 +226,20 @@ describe('withFeedPrimaryRead get', () => {
   it('carries the writer label into the primary state', async () => {
     const base = fakeBasePort({
       pages: [
-        [wire({ id: 'r1', version: 7, data: { a: 1 }, writerId: 'writer-b' })]
+        [
+          wire({
+            id: 'r1',
+            updatedAtCounter: 7,
+            data: { a: 1 },
+            writerId: 'writer-b'
+          })
+        ]
       ]
     })
     const port = withFeedPrimaryRead(base)
 
     expect(await port.get({ id: 'r1' })).toMatchObject({
-      version: 7,
+      updatedAtCounter: 7,
       writerId: 'writer-b'
     })
   })
@@ -222,9 +253,8 @@ describe('withFeedPrimaryRead get', () => {
         [
           wire({
             id: 'r1',
-            version: 7,
+            updatedAtCounter: 7,
             data: { a: 1 },
-            metaVersion: 2,
             etag: '"etag-7"',
             metaEtag: '"etag-2"'
           })
@@ -234,9 +264,8 @@ describe('withFeedPrimaryRead get', () => {
     const port = withFeedPrimaryRead(base)
 
     expect(await port.get({ id: 'r1' })).toMatchObject({
-      version: 7,
+      updatedAtCounter: 7,
       etag: '"etag-7"',
-      metaVersion: 2,
       metaEtag: '"etag-2"'
     })
   })
@@ -279,39 +308,59 @@ describe('withFeedPrimaryRead get', () => {
 describe('withFeedPrimaryRead get with a batch cache', () => {
   it('memoizes every document it pages past, so a sibling read costs no walk', async () => {
     const base = fakeBasePort({
-      pages: [[wire({ id: 'r1', version: 7 }), wire({ id: 'r2', version: 9 })]]
+      pages: [
+        [
+          wire({ id: 'r1', updatedAtCounter: 7 }),
+          wire({ id: 'r2', updatedAtCounter: 9 })
+        ]
+      ]
     })
     const port = withFeedPrimaryRead(base)
     const cache = emptyCache()
 
-    expect(await port.get({ id: 'r1', cache })).toMatchObject({ version: 7 })
+    expect(await port.get({ id: 'r1', cache })).toMatchObject({
+      updatedAtCounter: 7
+    })
     expect(base.queryCalls).toBe(1)
     // `r2` was paged past on the way to `r1`, so it is answered from the memo.
-    expect(await port.get({ id: 'r2', cache })).toMatchObject({ version: 9 })
+    expect(await port.get({ id: 'r2', cache })).toMatchObject({
+      updatedAtCounter: 9
+    })
     expect(base.queryCalls).toBe(1)
   })
 
   it('memoizes the documents of every page a multi-page walk passes', async () => {
     const base = fakeBasePort({
       pages: [
-        [wire({ id: 'r2', version: 9 })],
-        [wire({ id: 'r3', version: 11 })],
-        [wire({ id: 'r1', version: 7 })]
+        [wire({ id: 'r2', updatedAtCounter: 9 })],
+        [wire({ id: 'r3', updatedAtCounter: 11 })],
+        [wire({ id: 'r1', updatedAtCounter: 7 })]
       ]
     })
     const port = withFeedPrimaryRead(base)
     const cache = emptyCache()
 
-    expect(await port.get({ id: 'r1', cache })).toMatchObject({ version: 7 })
+    expect(await port.get({ id: 'r1', cache })).toMatchObject({
+      updatedAtCounter: 7
+    })
     expect(base.queryCalls).toBe(3)
-    expect(await port.get({ id: 'r2', cache })).toMatchObject({ version: 9 })
-    expect(await port.get({ id: 'r3', cache })).toMatchObject({ version: 11 })
+    expect(await port.get({ id: 'r2', cache })).toMatchObject({
+      updatedAtCounter: 9
+    })
+    expect(await port.get({ id: 'r3', cache })).toMatchObject({
+      updatedAtCounter: 11
+    })
     expect(base.queryCalls).toBe(3)
   })
 
   it('runs one walk, not one per row, for concurrent reads', async () => {
     const base = fakeBasePort({
-      pages: [[wire({ id: 'r1', version: 7 }), wire({ id: 'r2', version: 9 })]]
+      pages: [
+        [
+          wire({ id: 'r1', updatedAtCounter: 7 }),
+          wire({ id: 'r2', updatedAtCounter: 9 })
+        ]
+      ]
     })
     const port = withFeedPrimaryRead(base)
     const cache = emptyCache()
@@ -323,8 +372,8 @@ describe('withFeedPrimaryRead get with a batch cache', () => {
       port.get({ id: 'r2', cache })
     ])
 
-    expect(first).toMatchObject({ version: 7 })
-    expect(second).toMatchObject({ version: 9 })
+    expect(first).toMatchObject({ updatedAtCounter: 7 })
+    expect(second).toMatchObject({ updatedAtCounter: 9 })
     expect(base.queryCalls).toBe(1)
   })
 

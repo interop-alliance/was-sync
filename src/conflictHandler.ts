@@ -49,7 +49,12 @@ import {
   isUnknownEpochError,
   type DocCipher
 } from '@interop/was-client/sync'
-import { bodiesEqual, lwwFields } from './types.js'
+import {
+  bodiesEqual,
+  lwwFields,
+  opaqueBodyFields,
+  optionalBodyFields
+} from './types.js'
 import type { Json, LwwFields, SyncedDoc, WithDeleted } from './types.js'
 import { log } from './log.js'
 
@@ -90,15 +95,22 @@ export type ConflictWinner = 'local' | 'remote'
  * participates, the server-managed ones included. RxDB writes a pulled state
  * into the local row only where this says the two differ, and the feed echo of
  * this replica's own write is where that matters: the push-ack write-back has
- * already stamped the row with the server's `version` / `etag`, so by the time
+ * already stamped the row with the server's `etag` / `metaEtag`, so by the time
  * the echo arrives it differs only in what the server alone assigns
- * (`createdBy`, its own `updatedAt`, a `metaVersion` / `metaEtag` the write
- * did not return). An equality that stopped at the bodies and revisions would
- * let RxDB skip the echo, and every row this replica created would keep the
- * client's `updatedAt` and never learn its `createdBy`.
+ * (`createdBy`, its own `updatedAt`, `updatedAtCounter`, `originId`, and
+ * `meta`). An equality that stopped at the bodies and validators would let RxDB
+ * skip the echo, and every row this replica created would keep the client's
+ * `updatedAt`, never learn its `createdBy`, and never hold a server stamp. An
+ * edited row's `updatedAtCounter` and `originId` describe the last server
+ * state the row learned, not the edit, so the echo of the edit differs in them
+ * too and replaces the hybrid.
  *
- * The bodies compare canonically ({@link bodiesEqual}); every other member
- * compares strictly, an absent member equal only to an absent one.
+ * The bodies and `meta` compare canonically ({@link bodiesEqual}), so two
+ * distinct but member-equal `meta` objects compare equal and a member the
+ * server adds later still registers as a difference; every other member
+ * compares strictly, an absent member equal only to an absent one. The member
+ * list is {@link optionalBodyFields}, so a new optional member participates
+ * without a change here.
  *
  * @param a {WithDeleted<SyncedDoc>}
  * @param b {WithDeleted<SyncedDoc>}
@@ -112,22 +124,19 @@ export function statesEqual(
     a._deleted === b._deleted &&
     a.id === b.id &&
     a.updatedAt === b.updatedAt &&
-    a.version === b.version &&
-    a.metaVersion === b.metaVersion &&
-    a.createdBy === b.createdBy &&
-    a.epoch === b.epoch &&
-    a.etag === b.etag &&
-    a.metaEtag === b.metaEtag &&
-    bodiesEqual(a.data, b.data) &&
-    bodiesEqual(a.custom, b.custom)
+    optionalBodyFields.every(key =>
+      opaqueBodyFields.has(key)
+        ? bodiesEqual(a[key], b[key])
+        : a[key] === b[key]
+    )
   )
 }
 
 /**
  * Builds an RxDB conflict handler around an injected decision. The resolver
  * receives the full RxDB conflict input -- `assumedMasterState` and both sides'
- * `custom` included, which the version-only and metadata-only rules need -- and
- * answers with the side that wins.
+ * `custom` included, which the validator-only and metadata-only rules need --
+ * and answers with the side that wins.
  *
  * A resolver that THROWS is the one thing the handler itself has to say. RxDB
  * treats a failed conflict resolution as a fatal replication error rather than
@@ -282,11 +291,13 @@ function undecryptableReason(
  *
  * The rules, in order:
  *
- * 1. Version-only conflict: the server's whole content (`data` + `custom` +
+ * 1. Validator-only conflict: the server's whole content (`data` + `custom` +
  *    `_deleted`) still equals what this replica last synced, so the 412 came
  *    from a stale `If-Match` (typically this replica's own earlier write racing
- *    its feed echo). The local state -- edit or TOMBSTONE -- is re-asserted and
- *    re-pushed against the corrected revision. Without this rule a local delete
+ *    its feed echo). The write stamp and `meta` take no part in the comparison:
+ *    a primary that differs from the assumed one only in them is this case. The
+ *    local state -- edit or TOMBSTONE -- is re-asserted and re-pushed against
+ *    the corrected validator. Without this rule a local delete
  *    would be dropped by rule 5 and the row would silently resurrect. `custom`
  *    must be part of the comparison, or a concurrent metadata-only edit
  *    committed on the server would be misclassified here and clobbered.
@@ -338,24 +349,17 @@ export function lwwResolver({
     newDocumentState,
     assumedMasterState
   }: ConflictInput): Promise<ConflictWinner> {
-    // Rule 1 -- version-only conflict.
-    if (
+    // Rules 1 and 2 both ask whether the server moved the content half.
+    const sameContent =
       assumedMasterState !== undefined &&
       realMasterState._deleted === assumedMasterState._deleted &&
-      bodiesEqual(realMasterState.data, assumedMasterState.data) &&
-      bodiesEqual(realMasterState.custom, assumedMasterState.custom)
-    ) {
-      return 'local'
-    }
-    // Rule 2 -- metadata conflict: `data` and `_deleted` unchanged, `custom`
-    // moved on the server.
-    if (
-      assumedMasterState !== undefined &&
-      realMasterState._deleted === assumedMasterState._deleted &&
-      bodiesEqual(realMasterState.data, assumedMasterState.data) &&
-      !bodiesEqual(realMasterState.custom, assumedMasterState.custom)
-    ) {
-      return 'remote'
+      bodiesEqual(realMasterState.data, assumedMasterState.data)
+    if (sameContent) {
+      // Rule 1 -- validator-only conflict. Rule 2 -- metadata conflict:
+      // `data` and `_deleted` unchanged, `custom` moved on the server.
+      return bodiesEqual(realMasterState.custom, assumedMasterState.custom)
+        ? 'local'
+        : 'remote'
     }
     const [remote, local] = await Promise.all([
       lwwFieldsOf(realMasterState, decrypt),

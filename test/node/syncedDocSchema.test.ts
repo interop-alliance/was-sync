@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
+import { optionalBodyFields } from '../../src/types.js'
 
 describe('syncedDocSchema', () => {
   it('ships the merged shape at version 0', () => {
@@ -22,8 +23,18 @@ describe('syncedDocSchema', () => {
       properties: {
         id: { type: 'string', maxLength: 256 },
         updatedAt: { type: 'string', maxLength: 64 },
-        version: { type: 'number' },
-        metaVersion: { type: 'number' },
+        updatedAtCounter: { type: 'integer', minimum: 0 },
+        originId: { type: 'string', maxLength: 64 },
+        meta: {
+          type: 'object',
+          properties: {
+            updatedAt: { type: 'string', maxLength: 64 },
+            updatedAtCounter: { type: 'integer', minimum: 0 },
+            originId: { type: 'string', maxLength: 64 },
+            generation: { type: 'string', maxLength: 64 }
+          },
+          required: ['updatedAt', 'updatedAtCounter', 'originId', 'generation']
+        },
         createdBy: { type: 'string', maxLength: 256 },
         epoch: { type: 'string', maxLength: 256 },
         etag: { type: 'string', maxLength: 256 },
@@ -31,9 +42,53 @@ describe('syncedDocSchema', () => {
         data: { type: 'object', additionalProperties: true },
         custom: { type: 'object', additionalProperties: true }
       },
-      required: ['id', 'updatedAt', 'version'],
+      required: ['id', 'updatedAt'],
       indexes: ['updatedAt']
     })
+  })
+
+  it('declares exactly the required pair plus every optional body field', () => {
+    // The schema literal is kept by hand (RxDB hashes it), so this holds it in
+    // step with the one key table the mappings and the equality run on.
+    expect(Object.keys(syncedDocSchema().properties).sort()).toStrictEqual(
+      ['id', 'updatedAt', ...optionalBodyFields].sort()
+    )
+  })
+
+  it('drops the integer revision members for the server write stamp', () => {
+    const schema = syncedDocSchema()
+    expect('version' in schema.properties).toBe(false)
+    expect('metaVersion' in schema.properties).toBe(false)
+    expect(schema.required).toStrictEqual(['id', 'updatedAt'])
+    expect(schema.version).toBe(0)
+  })
+
+  it('types both counters as non-negative integers', () => {
+    const { properties } = syncedDocSchema()
+    const meta = properties['meta']!['properties'] as Record<
+      string,
+      Record<string, unknown>
+    >
+    for (const counter of [
+      properties['updatedAtCounter']!,
+      meta['updatedAtCounter']!
+    ]) {
+      expect(counter).toStrictEqual({ type: 'integer', minimum: 0 })
+    }
+  })
+
+  it('requires all four members of a present meta stamp', () => {
+    const meta = syncedDocSchema().properties['meta']!
+    expect(meta['type']).toBe('object')
+    expect(meta['required']).toStrictEqual([
+      'updatedAt',
+      'updatedAtCounter',
+      'originId',
+      'generation'
+    ])
+    expect(Object.keys(meta['properties'] as object)).toStrictEqual(
+      meta['required']
+    )
   })
 
   it('returns a fresh object per call, so a caller cannot mutate the shape', () => {
@@ -50,7 +105,7 @@ describe('syncedDocSchema', () => {
       maxLength: 256
     })
     expect('extra' in second.properties).toBe(false)
-    expect(second.required).toStrictEqual(['id', 'updatedAt', 'version'])
+    expect(second.required).toStrictEqual(['id', 'updatedAt'])
     expect(second.indexes).toStrictEqual(['updatedAt'])
   })
 })

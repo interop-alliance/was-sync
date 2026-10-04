@@ -25,8 +25,8 @@ driver: mapping the feed's wire documents into replica documents and applying
 the checkpoint rule, routing each local change to the content endpoint, the
 metadata endpoint, or a delete, assembling the conflict entry RxDB asks for when
 a conditional write is refused with `412`, recovering the one benign `412` (a
-delete refused on a drifted revision whose body is unchanged), writing each
-accepted write's acked revision back into the local row, and running one
+delete refused on a drifted validator whose body is unchanged), writing each
+accepted write's acked validator back into the local row, and running one
 replication per collection for a session behind a serialized start and stop.
 
 It was extracted from the two copies that had drifted apart in
@@ -58,6 +58,12 @@ and the change engine a replica-less wallet drives instead of RxDB
 `@interop/was-client` is a peer dependency rather than a dependency, so the
 consumer's single range decides which copy resolves. The package constructs none
 of its error classes and matches every one of them by `err.name`.
+
+The synced-document schema is documentation unless a consumer registers a
+validator. This package registers none, and its bounds (`maxLength`, `minimum`)
+describe what the server mints. The server's write stamp is stored as received,
+with no boundary guard. A consumer that wraps its storage in a validator takes
+on the consequence that a malformed server stamp wedges the pull.
 
 The `react-native` export condition is carried on all three subpaths, but it is
 forward-looking: there is no React Native consumer of this driver today, and

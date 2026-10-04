@@ -10,6 +10,12 @@
   the completeness pass
 - decision records extracted: none yet (candidates listed in section 6)
 
+Note: sections 4, 5, and 7 describe the revision rules (`version` /
+`metaVersion`, the `0` skip). WS-23's design
+([designs/WS-23-stamp-data-model.md](WS-23-stamp-data-model.md), approved
+2026-10-03) supersedes them where they conflict. The ack's shape under WS-17 is
+the full stamp, patched under WS-23 section 5's unit rule.
+
 ## 1. Problem and scope
 
 After this replica pushes a row, the server's echo of that write comes back down

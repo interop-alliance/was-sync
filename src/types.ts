@@ -11,14 +11,15 @@
  * as types only, so a body crosses the port boundary without a cast.
  *
  * The wire contract follows the WAS `changes` feed and its V2
- * encrypted-metadata profile: a synced document carries both a content revision
- * (`version` / `data`) and an independently-versioned metadata sub-resource
- * (`metaVersion` / `custom`). A metadata-only edit re-surfaces the resource with
- * a bumped `updatedAt` / `metaVersion` but unchanged `version` / `data`. The
- * sync layer moves both bodies opaquely: `data` is the stored content body
- * (plaintext JSON, or the EDV envelope on an encrypted collection) and `custom`
- * is the stored metadata body (an opaque envelope on an encrypted collection);
- * encrypt and decrypt stay a read-time and write-time concern above this layer.
+ * encrypted-metadata profile: a synced document carries both a content record
+ * (`data`, stamped `updatedAt` / `updatedAtCounter` / `originId`) and an
+ * independently-stamped metadata sub-resource (`custom`, stamped by the nested
+ * `meta` object). A metadata-only edit re-surfaces the resource with a new
+ * `meta` stamp and unchanged content stamp and `data`. The sync layer moves
+ * both bodies opaquely: `data` is the stored content body (plaintext JSON, or
+ * the EDV envelope on an encrypted collection) and `custom` is the stored
+ * metadata body (an opaque envelope on an encrypted collection); encrypt and
+ * decrypt stay a read-time and write-time concern above this layer.
  *
  * The two small helpers that travel with these shapes live here as well: the
  * opaque-body equality every routing decision is made on, and the optional-field
@@ -41,6 +42,17 @@ import type {
  * re-declared.
  */
 export type { Json }
+
+/**
+ * The `/meta` record's own write stamp with its generation,
+ * `{ updatedAt, updatedAtCounter, originId, generation }`, nested on a wire
+ * document, a primary state, and a stored row under `meta`. Present only once
+ * metadata has been written for the resource, and then complete: the driver
+ * stores and compares it whole and reads no member of it. storage-core's
+ * `ResourceMetaStamp`, named here through was-client's primary state until
+ * was-client re-exports the type from `./sync`.
+ */
+export type ResourceMetaStamp = NonNullable<ClientPrimaryState['meta']>
 
 /**
  * One document as the replication handlers see it: the stored shape plus RxDB's
@@ -83,41 +95,89 @@ export function lwwFields(doc: unknown): LwwFields | null {
 /**
  * The optional half of a synced document, shared verbatim by every shape it
  * travels in ({@link WireDoc} on the feed, {@link SyncedDoc} locally,
- * {@link PrimaryState} on the conflict re-read): the independently-versioned
- * metadata revision and body, the content body, the content body's key-epoch
- * stamp, the server-managed creator DID, and the opaque `ETag` validators.
- * Each is genuinely absent rather than `undefined` when the server has nothing
- * for it, so every mapping between the shapes copies them conditionally -- see
- * {@link copyOptionalBodyFields}.
+ * {@link PrimaryState} on the conflict re-read): the two server-minted members
+ * of the content write stamp, the metadata stamp and body, the content body,
+ * the content body's key-epoch id, the server-managed creator DID, and the
+ * opaque `ETag` validators. Each is genuinely absent rather than `undefined`
+ * when the server has nothing for it, so every mapping between the shapes
+ * copies them conditionally -- see {@link copyOptionalBodyFields}.
  */
 export interface OptionalBodyFields {
-  metaVersion?: number
+  /**
+   * The counter and origin halves of the content record's write stamp, minted
+   * by the server beside `updatedAt`. Absent on a row the server has not
+   * stamped yet (a fresh local row, the tombstone conflict entry). Copied as a
+   * pair from a feed document or a re-read primary and never minted here.
+   */
+  updatedAtCounter?: number
+  originId?: string
+  /**
+   * The `/meta` record's own stamp, present once metadata has been written.
+   */
+  meta?: ResourceMetaStamp
   data?: Json
   custom?: Json
+  /**
+   * The opaque key-epoch id `data` was encrypted under, when known (stamped by
+   * the encrypting cipher on a local write, or pulled off the feed). Sent as
+   * the `Key-Epoch` header on the content push so the server's stamp stays in
+   * step with the envelope.
+   */
   epoch?: string
   /**
    * The server-managed creator DID, present once the server records one. It
-   * rides the feed on a tombstone too, so it survives a delete.
+   * rides the feed on a tombstone too, so it survives a delete. Read-only
+   * here: the push side never writes it, and it rides the conflict entry so a
+   * resolved row keeps the creator the server recorded.
    */
   createdBy?: string
   /**
-   * The content `ETag`, quoted, exactly as the server emits it -- echo it back
-   * verbatim as a later content write's `ifMatch`. It can no longer be
-   * rebuilt from `version` alone, since the server's `ETag` also embeds a
-   * per-record generation marker ahead of the version.
+   * The content `ETag`, quoted, exactly as the server last reported it (off
+   * the feed, a re-read, or a write's own ack) -- echo it back verbatim as a
+   * later content write's `ifMatch`. Opaque: no revision number is read out
+   * of it.
    */
   etag?: string
   /**
-   * The `/meta` object's `ETag`, quoted, exactly as the server emits it --
-   * echo it back verbatim as a later metadata write's `ifMatch`.
+   * The `/meta` object's `ETag`, quoted, exactly as the server last reported
+   * it -- echo it back verbatim as a later metadata write's `ifMatch`.
    */
   metaEtag?: string
 }
 
 /**
- * Structural equality over two opaque bodies, by JCS-canonicalized JSON string,
- * so a key-order-only difference between two structurally identical bodies is
- * not misread as a change. Decides whether the content or the metadata half
+ * The {@link OptionalBodyFields} members by name, the one list the optional
+ * half is copied and compared from. A member added to the interface is added
+ * here too (the `satisfies` check holds the two in step), and every mapping and
+ * the default equality pick it up without a change of their own.
+ */
+export const optionalBodyFields = [
+  'updatedAtCounter',
+  'originId',
+  'meta',
+  'data',
+  'custom',
+  'epoch',
+  'createdBy',
+  'etag',
+  'metaEtag'
+] as const satisfies readonly (keyof OptionalBodyFields)[]
+
+/**
+ * The members of {@link optionalBodyFields} that are JSON objects compared
+ * canonically ({@link bodiesEqual}) rather than strictly: the two opaque bodies
+ * and the `/meta` stamp.
+ */
+export const opaqueBodyFields: ReadonlySet<keyof OptionalBodyFields> = new Set([
+  'meta',
+  'data',
+  'custom'
+])
+
+/**
+ * Structural equality over two JSON values (the opaque bodies, and the `/meta`
+ * stamp), by JCS-canonicalized JSON string, so a key-order-only difference
+ * between two structurally identical values is not misread as a change. Decides whether the content or the metadata half
  * changed -- which endpoint(s) a push writes, whether the benign-412 delete
  * retry fires, and whether two states compare equal for conflict resolution.
  * Canonical rather than raw `JSON.stringify`, because a host that re-serializes
@@ -125,14 +185,11 @@ export interface OptionalBodyFields {
  * retry (leaving a retracted resource live) and draw a spurious `PUT` on an
  * immutable content-addressed row.
  *
- * @param left {Json | undefined}
- * @param right {Json | undefined}
+ * @param left {unknown}   a JSON value, or `undefined` for an absent one
+ * @param right {unknown}
  * @returns {boolean}
  */
-export function bodiesEqual(
-  left: Json | undefined,
-  right: Json | undefined
-): boolean {
+export function bodiesEqual(left: unknown, right: unknown): boolean {
   return jcsCanonicalize(left ?? null) === jcsCanonicalize(right ?? null)
 }
 
@@ -141,7 +198,8 @@ export function bodiesEqual(
  * `target`, leaving an absent field absent (never writing an explicit
  * `undefined`, which would surface the key in a serialized body). The single
  * place every wire-to-local, feed-to-primary, and primary-to-conflict mapping
- * shares, so a new optional wire field is added once.
+ * shares, driven by {@link optionalBodyFields} so a new optional wire field is
+ * declared once.
  *
  * @param options {object}
  * @param options.source {OptionalBodyFields}
@@ -155,26 +213,13 @@ export function copyOptionalBodyFields({
   source: OptionalBodyFields
   target: OptionalBodyFields
 }): void {
-  if (source.data !== undefined) {
-    target.data = source.data
-  }
-  if (source.metaVersion !== undefined) {
-    target.metaVersion = source.metaVersion
-  }
-  if (source.custom !== undefined) {
-    target.custom = source.custom
-  }
-  if (source.epoch !== undefined) {
-    target.epoch = source.epoch
-  }
-  if (source.createdBy !== undefined) {
-    target.createdBy = source.createdBy
-  }
-  if (source.etag !== undefined) {
-    target.etag = source.etag
-  }
-  if (source.metaEtag !== undefined) {
-    target.metaEtag = source.metaEtag
+  // Indexed through a loose view: one member at a time the key types line up,
+  // but TypeScript cannot see that across a union of keys.
+  const sink = target as Record<string, unknown>
+  for (const key of optionalBodyFields) {
+    if (source[key] !== undefined) {
+      sink[key] = source[key]
+    }
   }
 }
 
@@ -200,76 +245,57 @@ export interface ReplicationCheckpoint {
 
 /**
  * One document as it travels on the `changes`-feed wire
- * (`POST /space/:s/:c/query`, profile `changes`). `id` is the WAS resourceId,
- * `version` is the content revision number and the user content body is
- * nested under `data`; `metaVersion` is the independent metadata revision and
- * the user-writable metadata body is under `custom`. A tombstone carries
- * `_deleted: true` with no `data`. `metaVersion` / `custom` are present only
- * once metadata has been written for the resource.
+ * (`POST /space/:s/:c/query`, profile `changes`). `id` is the WAS resourceId;
+ * `updatedAt`, `updatedAtCounter`, and `originId` are the content record's
+ * write stamp and the user content body is nested under `data`; the nested
+ * `meta` object is the `/meta` record's own stamp and the user-writable
+ * metadata body is under `custom`. A tombstone carries `_deleted: true` with no
+ * `data`. `meta` / `custom` are present only once metadata has been written for
+ * the resource.
  *
- * `version` and `metaVersion` are for comparison/ordering only -- they are not
- * usable `ifMatch` values on their own, since the server's `ETag` is an opaque
- * string that embeds more than the revision number. `etag` and `metaEtag`
- * carry those opaque validators, quoted exactly as the server emits them, so a
- * puller can pass one back verbatim as a conditional write's `ifMatch` without
- * a separate {@link WasSyncPort.get}. `epoch` is the opaque key-epoch id the
- * content body was encrypted under, and `createdBy` the server-managed creator
- * DID, both moved verbatim. `writerId` is the writer-attribution label the
- * revision was written under, when one was declared; the pull mapping does not
- * carry it into the local row. was-client's own feed document type, aliased
- * here so the driver and the port agree by construction.
+ * The stamps are for comparison only -- they are not usable `ifMatch` values.
+ * `etag` and `metaEtag` carry the opaque validators, quoted exactly as the
+ * server emits them, so a puller can pass one back verbatim as a conditional
+ * write's `ifMatch` without a separate {@link WasSyncPort.get}. `epoch` is the
+ * opaque key-epoch id the content body was encrypted under, and `createdBy` the
+ * server-managed creator DID, both moved verbatim. `writerId` is the
+ * writer-attribution label the write was declared under, when one was; the
+ * pull mapping does not carry it into the local row. was-client's own feed
+ * document type, aliased here so the driver and the port agree by construction.
  */
 export type WireDoc = ClientWireDoc
 
 /**
  * The local replica's document shape, shared across every synced collection.
  * The envelope fields are top-level (`id` primary key, `updatedAt` the
- * wall-clock change stamp, `version` / `metaVersion` the server revisions); the
- * user bodies stay nested (`data` for content, `custom` for metadata) to avoid
- * field collisions. `_deleted` is managed by RxDB via `deletedField` and so is
- * not part of this "clean" shape (the handlers work with
+ * wall-clock change stamp, `updatedAtCounter` / `originId` the server-minted
+ * rest of the content write stamp, `meta` the `/meta` record's stamp); the user
+ * bodies stay nested (`data` for content, `custom` for metadata) to avoid field
+ * collisions. `_deleted` is managed by RxDB via `deletedField` and so is not
+ * part of this "clean" shape (the handlers work with
  * {@link WithDeleted}`<SyncedDoc>`).
+ *
+ * The stamp on a local row is the last server state the row learned, not a
+ * description of the local edit. An app edit moves `updatedAt` and leaves
+ * `updatedAtCounter` and `originId` where they were, so an edited row holds a
+ * triple no server minted until its echo arrives. The driver reads the two
+ * server-minted members nowhere; a consumer must not read the triple off a
+ * local row as an order key.
+ *
+ * The optional half is {@link OptionalBodyFields}, the same members the wire
+ * document and the primary state carry.
  */
-export interface SyncedDoc {
+export interface SyncedDoc extends OptionalBodyFields {
   id: string
   updatedAt: string
-  version: number
-  metaVersion?: number
-  data?: Json
-  custom?: Json
-  /**
-   * The opaque key-epoch id `data` was encrypted under, when known (stamped by
-   * the encrypting cipher on a local write, or pulled off the feed). Sent as
-   * the `Key-Epoch` header on the content push so the server's stamp stays in
-   * step with the envelope.
-   */
-  epoch?: string
-  /**
-   * The server-managed creator DID, pulled off the feed. Read-only here: the
-   * push side never writes it, and it rides the conflict entry so a resolved
-   * row keeps the creator the server recorded.
-   */
-  createdBy?: string
-  /**
-   * The content `ETag`, quoted, exactly as the server last reported it (off
-   * the feed, a re-read, or a write's own ack). Echoed back verbatim as the
-   * next content write's `ifMatch` -- it is opaque and cannot be rebuilt from
-   * `version`.
-   */
-  etag?: string
-  /**
-   * The `/meta` object's `ETag`, quoted, exactly as the server last reported
-   * it. Echoed back verbatim as the next metadata write's `ifMatch`.
-   */
-  metaEtag?: string
 }
 
 /**
  * The current server-side state of a single resource, as read back for the 412
- * conflict path: was-client's own primary state (content `version` /
- * `updatedAt`, plus the optional `metaVersion` / `data` / `custom` /
- * `createdBy` / `epoch`) plus the OPTIONAL `deleted` flag that distinguishes a
- * tombstone from a live resource.
+ * conflict path: was-client's own primary state (the content `updatedAt`, plus
+ * the optional `updatedAtCounter` / `originId` / `meta` / `data` / `custom` /
+ * `createdBy` / `epoch` and the validators) plus the OPTIONAL `deleted` flag
+ * that distinguishes a tombstone from a live resource.
  *
  * The flag is optional because the two `get` implementations report an absent
  * resource differently. A feed-backed read ({@link withFeedPrimaryRead})
@@ -304,13 +330,12 @@ export interface PrimaryReadCache {
 }
 
 /**
- * The acknowledgment a conditional write returns: the new revision number plus
- * the opaque `etag` validator it lives behind, exactly as the server sent it.
- * Pass `etag` back verbatim as a later write's `ifMatch` -- it can no longer be
- * synthesized from the revision number alone, since the server's `ETag` also
- * embeds a per-record generation marker ahead of it. `etag` is absent against a
- * backend that does not version resources; was-client's own ack type, aliased
- * here so the driver and the port agree by construction.
+ * The acknowledgment a conditional write returns: the opaque `etag` validator
+ * the accepted write earned, exactly as the server sent it. Pass it back
+ * verbatim as a later write's `ifMatch`. It carries no stamp and no revision;
+ * the write's stamp reaches the row from the feed's echo or a re-read primary.
+ * `etag` is absent where the header did not reach the client; was-client's own
+ * ack type, aliased here so the driver and the port agree by construction.
  */
 export type WriteAck = ClientWriteAck
 
