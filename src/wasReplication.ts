@@ -84,9 +84,10 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
  * @param [options.writerId] {string}    this replica's writer-attribution
  *   label (the WAS `writerId`), minted and kept app-side. The driver never
  *   mints, persists, or derives one. When present, every content write and
- *   delete declares it as the `Writer-Id` header and every metadata write as
- *   the body's `writerId` member. When absent, pushes declare no label, which
- *   clears any stored one under the server's declare-or-clear rule. A session
+ *   delete declares it as the `Writer-Id` header; a metadata write sends none,
+ *   since the label is a member of the content record alone. When absent,
+ *   pushes declare no label, which clears any stored one under the server's
+ *   declare-or-clear rule. A session
  *   that must not reveal a stable label to the host leaves it absent or passes
  *   a per-session one. The pull side does not read it: the pull handler
  *   decrypts nothing (bodies are opaque), so a replica's own echo has no

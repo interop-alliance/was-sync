@@ -935,3 +935,36 @@ write of the tombstone's body. Nothing exercises the option today, so the gap is
 latent.
 
 discovered-from: WS-17
+
+### WS-25: Stop sending `writerId` on the `/meta` write
+
+- status: done
+- done: 2026-10-04
+- priority: medium
+- labels: push, writer-id, was-96
+- blocked-by: WS-23
+- touches:
+  - was-sync (ARCHITECTURE.md invariant 17, Glossary `Writer id`, README):
+    updated 2026-10-04 with the source change
+  - was-client (`putMeta` drops its `writerId` option; ARCHITECTURE/AGENTS):
+    WCL-125, filed 2026-10-04
+  - unaffected: wallet-core (the engine issues no `/meta` write; its metadata
+    push half lives in this driver)
+- acceptance:
+  - [x] The push handler sends no `writerId` member on a `/meta` write, and
+        keeps the `Writer-Id` header on content writes, deletes, and the
+        benign-412 re-issue
+  - [x] The unit cases that assert the body member are inverted
+  - [x] ARCHITECTURE.md invariant 17 and the Glossary describe the label as a
+        content-record member only
+  - [x] CHANGELOG.md entry
+  - [x] `touches:` entries resolved
+
+Context: WAS-96's open point 2 moves `writerId` to the content record alone. A
+`/meta` write no longer touches it, and the spec's declare-or-clear rule for
+Update Resource Metadata is withdrawn. Invariant 17 and the 0.6.0 CHANGELOG
+entry say every metadata write declares the label in its body. Once the server
+ignores the member, sending it is harmless but misleading, and once the port
+drops the option it no longer compiles. The benign-412 delete retry reads the
+label off the re-read primary's content record, which WAS-96 keeps, so WS-5's
+rule is unaffected.

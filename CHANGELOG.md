@@ -54,6 +54,11 @@
     `ResourceMetaStamp` type is was-client's own, re-exported from the root
     entry. The integration suite runs against was-teaching-server 0.41.1
     (WS-23).
+- The push handler no longer sends a `writerId` member on a `/meta` write. The
+  label is a member of the content record alone, and the `Writer-Id` header
+  still goes on content writes and deletes. The public `writerId` option is
+  unchanged. `WasSyncPort.putMeta` lost its `writerId` option, which matters
+  only to a consumer that implements the port (WS-25).
 - Docs: ARCHITECTURE.md records that was-client's sync port (0.89.0) filters the
   widened `changes` feed. It hands on JSON Resources and their tombstones only,
   with `deleted` renamed `_deleted`, so the pull handler and the feed primary

@@ -22,35 +22,6 @@ in [AGENTS.md](AGENTS.md) under "Roadmap & Task Conventions".
 
 ---
 
-### WS-25: Stop sending `writerId` on the `/meta` write
-
-- status: todo
-- priority: medium
-- labels: push, writer-id, was-96
-- blocked-by: WS-23
-- touches:
-  - was-sync (ARCHITECTURE.md invariant 17, Glossary `Writer id`, README)
-  - was-client (`putMeta` drops its `writerId` option; ARCHITECTURE/AGENTS)
-  - wallet-core (the engine's `/meta` write)
-- acceptance:
-  - [ ] The push handler sends no `writerId` member on a `/meta` write, and
-        keeps the `Writer-Id` header on content writes, deletes, and the
-        benign-412 re-issue
-  - [ ] The unit cases that assert the body member are inverted
-  - [ ] ARCHITECTURE.md invariant 17 and the Glossary describe the label as a
-        content-record member only
-  - [ ] CHANGELOG.md entry
-  - [ ] `touches:` entries resolved
-
-Context: WAS-96's open point 2 moves `writerId` to the content record alone. A
-`/meta` write no longer touches it, and the spec's declare-or-clear rule for
-Update Resource Metadata is withdrawn. Invariant 17 and the 0.6.0 CHANGELOG
-entry say every metadata write declares the label in its body. Once the server
-ignores the member, sending it is harmless but misleading, and once the port
-drops the option it no longer compiles. The benign-412 delete retry reads the
-label off the re-read primary's content record, which WAS-96 keeps, so WS-5's
-rule is unaffected.
-
 ### WS-26: Record why the default resolver keeps the payload-stamp order under WAS-96
 
 - status: todo

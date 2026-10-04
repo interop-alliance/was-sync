@@ -181,12 +181,12 @@ request rate.
 
 An optional `writerId` (also accepted by `createWasReplication`) is the WAS
 writer-attribution label. When it is set, every content write and delete
-declares it as the `Writer-Id` header and every metadata write as the body's
-`writerId` member. When it is absent, pushes declare none, which clears any
-stored label on the server. The app mints and keeps the label (`getWriterId` is
-a helper for that); a session that must not reveal a stable label to the host
-leaves it absent or passes a per-session one. The label is advisory and never an
-identity.
+declares it as the `Writer-Id` header. A metadata write sends none, because the
+label belongs to the content record alone. When it is absent, content writes and
+deletes declare none, which clears any stored label on the server. The app mints
+and keeps the label (`getWriterId` is a helper for that); a session that must
+not reveal a stable label to the host leaves it absent or passes a per-session
+one. The label is advisory and never an identity.
 
 ### Logging
 

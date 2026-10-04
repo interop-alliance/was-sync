@@ -1672,7 +1672,10 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     }
     const rawPutMeta = port.putMeta.bind(port)
     port.putMeta = async options => {
-      declared.push({ kind: 'putMeta', writerId: options.writerId })
+      // A `/meta` write sends no label: the label is a member of the content
+      // record alone.
+      expect(options).not.toHaveProperty('writerId')
+      declared.push({ kind: 'putMeta' })
       return rawPutMeta(options)
     }
     const rawDelete = port.deleteContent.bind(port)
@@ -1734,7 +1737,9 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       'putContent',
       'putMeta'
     ])
-    for (const write of declared) {
+    // The label rides the content writes and the delete; the `putMeta` spy
+    // above checks that the `/meta` write carried none.
+    for (const write of declared.filter(write => write.kind !== 'putMeta')) {
       expect(write.writerId).toBe('writer-a')
     }
 

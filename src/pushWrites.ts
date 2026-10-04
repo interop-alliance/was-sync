@@ -100,14 +100,15 @@
  * the follow-up push cycle it triggers finds nothing changed to write and
  * settles -- no re-push loop.
  *
- * Every content write, delete, and metadata write carries the injected
- * `writerId`, when one was injected: the `Writer-Id` header on `PUT /:id` and
- * `DELETE /:id`, and the body's top-level `writerId` member on `PUT /:id/meta`
- * (the WAS writer-attribution label). The label is minted app-side; this
- * handler never mints, persists, or derives one. The server's declare-or-clear
- * rule means a write without it clears the stored label, so a replication run
- * without a `writerId` attributes nothing rather than leaving a previous
- * writer's label in place. The benign-412 delete re-issue declares it too.
+ * Every content write and delete carries the injected `writerId`, when one was
+ * injected, as the `Writer-Id` header on `PUT /:id` and `DELETE /:id` (the WAS
+ * writer-attribution label). A `PUT /:id/meta` sends none: the label is a
+ * member of the content record alone, and a metadata write leaves it as it is.
+ * The label is minted app-side; this handler never mints, persists, or derives
+ * one. The server's declare-or-clear rule means a content write without it
+ * clears the stored label, so a replication run without a `writerId`
+ * attributes nothing rather than leaving a previous writer's label in place.
+ * The benign-412 delete re-issue declares it too.
  */
 import {
   isSyncAuthError,
@@ -217,7 +218,7 @@ function primaryOrTombstone({
  * @param [options.cache] {PrimaryReadCache}   the push batch's shared
  *   primary-read memo
  * @param [options.writerId] {string}   this writer's attribution label, sent
- *   on every write and delete; absent sends none
+ *   on every content write and delete; absent sends none
  * @returns {Promise<{ conflict: WithDeleted<SyncedDoc> | null,
  *   ack: PushWriteAck | null }>}
  */
@@ -253,7 +254,8 @@ async function pushRow({
     !assumedIsTombstone &&
     (assumedMasterState?.meta !== undefined || assumedMetaEtag !== undefined)
   const ack: PushWriteAck = { id }
-  // Spread into every write, so a replication run without a label sends none.
+  // Spread into every content write and delete, so a replication run without
+  // a label sends none.
   const attribution = writerId !== undefined ? { writerId } : {}
   // A validator alone is acked state; a response with no `ETag` acks nothing.
   const hasAck = () => ack.etag !== undefined || ack.metaEtag !== undefined
@@ -439,8 +441,7 @@ async function pushRow({
           }),
           ...(assumedHasMeta
             ? assumedMetaEtag !== undefined && { ifMatch: assumedMetaEtag }
-            : { ifNoneMatch: true }),
-          ...attribution
+            : { ifNoneMatch: true })
         })
       )
     } catch (err) {
@@ -497,7 +498,7 @@ async function pushRow({
  * @param options.port {WasSyncPort}
  * @param [options.onWriteAccepted] {(ack: PushWriteAck) => Promise<void>}
  * @param [options.writerId] {string}   this writer's attribution label, sent
- *   on every content write, delete, and metadata write; absent sends none
+ *   on every content write and delete; absent sends none
  * @returns {(rows: Array<{ newDocumentState: WithDeleted<SyncedDoc>,
  *   assumedMasterState?: WithDeleted<SyncedDoc> }>) =>
  *   Promise<WithDeleted<SyncedDoc>[]>}

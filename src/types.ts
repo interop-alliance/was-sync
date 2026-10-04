@@ -446,16 +446,15 @@ export interface WasSyncBasePort {
    * the not-found signal (`err.name === 'WasSyncNotFoundError'`) on the default
    * port, or the auth signal carrying `status: 404` on a `mapAuthErrors` port;
    * the push handler corroborates either against the changes feed before
-   * treating it as a delete race. `writerId` declares the writing agent's
-   * attribution label as the body's top-level `writerId` member; an absent one
-   * clears the stored label.
+   * treating it as a delete race. No writer-attribution label is sent: the
+   * label is a member of the content record alone, and a metadata write
+   * leaves it unchanged.
    *
    * @param options {object}
    * @param options.id {string}
    * @param [options.custom] {Json}   absent = write the cleared state
    * @param [options.ifMatch] {string}
    * @param [options.ifNoneMatch] {boolean}
-   * @param [options.writerId] {string}
    * @returns {Promise<WriteAck | undefined>}
    */
   putMeta(options: {
@@ -463,7 +462,6 @@ export interface WasSyncBasePort {
     custom?: Json
     ifMatch?: string
     ifNoneMatch?: boolean
-    writerId?: string
   }): Promise<WriteAck | undefined>
 }
 

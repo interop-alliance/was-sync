@@ -266,18 +266,19 @@ numbered so items and reviews can cite them.
     scored `undecryptable` rather than `none` so the write is not silently lost.
 17. **Pushes declare the injected writer id, or none.** The replication takes an
     optional `writerId` (`createWasReplication`, `createSyncController`) and the
-    push handler declares it on every write it issues: the `Writer-Id` header on
-    a content write and a delete (the benign-412 re-issue included), and the
-    body's `writerId` member on a `/meta` write. With none injected, no write
-    declares one, and the server's declare-or-clear rule clears the stored
-    label. The driver never mints, persists, or derives the label; the app does
-    (`getWriterId` is its helper, invariant 8). The pull side does not read it.
-    The pull handler decrypts nothing (invariant 1), so a replica's own echo has
-    no decrypt to skip, and RxDB writes a pulled state into the local row only
-    where the collection's `isEqual` says it differs. The feed's `writerId` is
-    not carried into the local row either, since the replica schema has no
-    member for it (invariant 7). The replica-less engine in
-    `@interop/wallet-core/sync` stamps pushes the same way and additionally
+    push handler declares it as the `Writer-Id` header on a content write and a
+    delete (the benign-412 re-issue included). A `/meta` write sends none,
+    because the label is a member of the content record alone and the server
+    ignores a `writerId` member in a `/meta` body. With none injected, no
+    content write or delete declares one, and the server's declare-or-clear rule
+    clears the stored label. The driver never mints, persists, or derives the
+    label; the app does (`getWriterId` is its helper, invariant 8). The pull
+    side does not read it. The pull handler decrypts nothing (invariant 1), so a
+    replica's own echo has no decrypt to skip, and RxDB writes a pulled state
+    into the local row only where the collection's `isEqual` says it differs.
+    The feed's `writerId` is not carried into the local row either, since the
+    replica schema has no member for it (invariant 7). The replica-less engine
+    in `@interop/wallet-core/sync` stamps pushes the same way and additionally
     skips the decrypt of an own-writer echo whose `etag` its store confirms it
     holds; the two converge on the same server state either way.
 18. **The default `isEqual` compares every member of the synced document.**
@@ -419,11 +420,12 @@ the byoe-ecosystem layer map instead.
   members (`updatedAtCounter`, `originId`, `meta`). Avoid: reflection, bounce.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a write; it attributes history and breaks last-write-wins ties.
-  On the wire it is the WAS `writerId`, which the push handler declares when the
-  app injects one (invariant 17). It is distinct from `originId`, which names
-  the store that minted a stamp and is not an attribution label. Avoid: device
-  id, replica id, client id (a client id is keyed and custodied; this is
-  neither).
+  On the wire it is the WAS `writerId`, a member of the content record alone,
+  which the push handler declares as the `Writer-Id` header on content writes
+  and deletes when the app injects one (invariant 17). It is distinct from
+  `originId`, which names the store that minted a stamp and is not an
+  attribution label. Avoid: device id, replica id, client id (a client id is
+  keyed and custodied; this is neither).
 - **Write stamp** -- the `(updatedAt, updatedAtCounter, originId)` triple the
   server mints on every versioned record (storage-core's `WriteStamp`). The
   `/meta` record's own stamp and its `generation` nest under `meta`

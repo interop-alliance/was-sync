@@ -176,7 +176,8 @@ export function isAuthError(err: unknown): boolean {
  * @param [options.writerId] {string}   this replica's writer-attribution label
  *   (the WAS `writerId`), minted and kept app-side (the root entry's `getWriterId`
  *   for a helper); the driver never mints, persists, or derives one. When
- *   present, every push in every collection declares it. When absent, pushes
+ *   present, every content write and delete in every collection declares it
+ *   as the `Writer-Id` header (a metadata write sends none). When absent, pushes
  *   declare no label, which clears any stored one under the server's
  *   declare-or-clear rule. A session that must not reveal a stable label to
  *   the host leaves it absent or passes a per-session one.

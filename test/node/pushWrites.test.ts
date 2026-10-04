@@ -2162,7 +2162,7 @@ describe('createPushHandler typed signals from another copy', () => {
 describe('createPushHandler writer attribution', () => {
   const writerId = 'writer-a'
 
-  it('declares the writerId on a content create and its metadata write', async () => {
+  it('declares the writerId on a content create and not on its metadata write', async () => {
     const port = fakePushPort()
     const push = createPushHandler({ port, writerId })
 
@@ -2184,17 +2184,11 @@ describe('createPushHandler writer attribution', () => {
         ifNoneMatch: true,
         writerId
       },
-      {
-        kind: 'putMeta',
-        id: 'r1',
-        custom: { jwe: 'x' },
-        ifNoneMatch: true,
-        writerId
-      }
+      { kind: 'putMeta', id: 'r1', custom: { jwe: 'x' }, ifNoneMatch: true }
     ])
   })
 
-  it('declares the writerId on a content update and a metadata clear', async () => {
+  it('declares the writerId on a content update and not on a metadata clear', async () => {
     const port = fakePushPort()
     const push = createPushHandler({ port, writerId })
 
@@ -2224,7 +2218,7 @@ describe('createPushHandler writer attribution', () => {
         ifMatch: etagFor(2),
         writerId
       },
-      { kind: 'putMeta', id: 'r1', ifMatch: metaEtagFor(1), writerId }
+      { kind: 'putMeta', id: 'r1', ifMatch: metaEtagFor(1) }
     ])
   })
 
