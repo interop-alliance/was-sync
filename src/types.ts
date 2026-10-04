@@ -29,6 +29,7 @@ import { canonicalize as jcsCanonicalize } from 'json-canonicalize'
 import type {
   Json,
   MasterState as ClientPrimaryState,
+  ResourceMetaStamp,
   SyncCheckpoint as ClientSyncCheckpoint,
   WireDoc as ClientWireDoc,
   WriteAck as ClientWriteAck
@@ -48,11 +49,10 @@ export type { Json }
  * `{ updatedAt, updatedAtCounter, originId, generation }`, nested on a wire
  * document, a primary state, and a stored row under `meta`. Present only once
  * metadata has been written for the resource, and then complete: the driver
- * stores and compares it whole and reads no member of it. storage-core's
- * `ResourceMetaStamp`, named here through was-client's primary state until
- * was-client re-exports the type from `./sync`.
+ * stores and compares it whole and reads no member of it. was-client's type,
+ * re-exported so a consumer names it from here.
  */
-export type ResourceMetaStamp = NonNullable<ClientPrimaryState['meta']>
+export type { ResourceMetaStamp }
 
 /**
  * One document as the replication handlers see it: the stored shape plus RxDB's
@@ -177,19 +177,24 @@ export const opaqueBodyFields: ReadonlySet<keyof OptionalBodyFields> = new Set([
 /**
  * Structural equality over two JSON values (the opaque bodies, and the `/meta`
  * stamp), by JCS-canonicalized JSON string, so a key-order-only difference
- * between two structurally identical values is not misread as a change. Decides whether the content or the metadata half
- * changed -- which endpoint(s) a push writes, whether the benign-412 delete
- * retry fires, and whether two states compare equal for conflict resolution.
- * Canonical rather than raw `JSON.stringify`, because a host that re-serializes
- * a stored body with a different key order would otherwise defeat the delete
- * retry (leaving a retracted resource live) and draw a spurious `PUT` on an
- * immutable content-addressed row.
+ * between two structurally identical values is not misread as a change.
+ * Decides whether the content or the metadata half changed -- which endpoint(s)
+ * a push writes, whether the benign-412 delete retry fires, and whether two
+ * states compare equal for conflict resolution. Canonical rather than raw
+ * `JSON.stringify`, because a host that re-serializes a stored body with a
+ * different key order would otherwise defeat the delete retry (leaving a
+ * retracted resource live) and draw a spurious `PUT` on an immutable
+ * content-addressed row. The same reference, or two absent values, compare
+ * equal without serializing.
  *
  * @param left {unknown}   a JSON value, or `undefined` for an absent one
  * @param right {unknown}
  * @returns {boolean}
  */
 export function bodiesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true
+  }
   return jcsCanonicalize(left ?? null) === jcsCanonicalize(right ?? null)
 }
 

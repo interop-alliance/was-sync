@@ -108,9 +108,11 @@ export type ConflictWinner = 'local' | 'remote'
  * The bodies and `meta` compare canonically ({@link bodiesEqual}), so two
  * distinct but member-equal `meta` objects compare equal and a member the
  * server adds later still registers as a difference; every other member
- * compares strictly, an absent member equal only to an absent one. The member
- * list is {@link optionalBodyFields}, so a new optional member participates
- * without a change here.
+ * compares strictly, an absent member equal only to an absent one. The strict
+ * members go first: a feed echo most often differs in a validator, and that
+ * mismatch is found before any body is serialized. The member list is
+ * {@link optionalBodyFields}, so a new optional member participates without a
+ * change here.
  *
  * @param a {WithDeleted<SyncedDoc>}
  * @param b {WithDeleted<SyncedDoc>}
@@ -120,16 +122,24 @@ export function statesEqual(
   a: WithDeleted<SyncedDoc>,
   b: WithDeleted<SyncedDoc>
 ): boolean {
-  return (
-    a._deleted === b._deleted &&
-    a.id === b.id &&
-    a.updatedAt === b.updatedAt &&
-    optionalBodyFields.every(key =>
-      opaqueBodyFields.has(key)
-        ? bodiesEqual(a[key], b[key])
-        : a[key] === b[key]
-    )
-  )
+  if (
+    a._deleted !== b._deleted ||
+    a.id !== b.id ||
+    a.updatedAt !== b.updatedAt
+  ) {
+    return false
+  }
+  for (const key of optionalBodyFields) {
+    if (!opaqueBodyFields.has(key) && a[key] !== b[key]) {
+      return false
+    }
+  }
+  for (const key of opaqueBodyFields) {
+    if (!bodiesEqual(a[key], b[key])) {
+      return false
+    }
+  }
+  return true
 }
 
 /**

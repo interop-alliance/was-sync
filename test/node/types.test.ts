@@ -16,6 +16,7 @@ import {
   lwwFields
 } from '../../src/types.js'
 import type { OptionalBodyFields } from '../../src/types.js'
+import { metaStamp } from './fixtures.js'
 
 describe('lwwFields', () => {
   it('reads the stamp off a payload carrying both fields', () => {
@@ -65,12 +66,12 @@ describe('bodiesEqual', () => {
 })
 
 describe('copyOptionalBodyFields', () => {
-  const metaStamp = {
+  const stamp = metaStamp({
     updatedAt: '2026-01-02T00:00:00.000Z',
     updatedAtCounter: 3,
     originId: 'origin-b',
     generation: 'gen-1'
-  }
+  })
 
   it('carries every present optional field', () => {
     const target: OptionalBodyFields = {}
@@ -80,7 +81,7 @@ describe('copyOptionalBodyFields', () => {
         custom: { b: 2 },
         updatedAtCounter: 0,
         originId: 'origin-a',
-        meta: metaStamp,
+        meta: stamp,
         epoch: 'epoch-1',
         createdBy: 'did:key:z6MkCreator',
         etag: '"etag-7"',
@@ -93,7 +94,7 @@ describe('copyOptionalBodyFields', () => {
       custom: { b: 2 },
       updatedAtCounter: 0,
       originId: 'origin-a',
-      meta: metaStamp,
+      meta: stamp,
       epoch: 'epoch-1',
       createdBy: 'did:key:z6MkCreator',
       etag: '"etag-7"',

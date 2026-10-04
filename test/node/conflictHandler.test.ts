@@ -168,7 +168,7 @@ describe('makeLwwConflictHandler', () => {
     expect(
       handler.isEqual(echo, {
         ...echo,
-        meta: metaStamp({ updatedAtCounter: 1 })
+        meta: metaStamp()
       })
     ).toBe(false)
   })
@@ -214,10 +214,7 @@ describe('makeLwwConflictHandler', () => {
   })
 
   it('isEqual differs on each meta member', () => {
-    const base = row(
-      { updatedAt: 't1', writerId: 'd1' },
-      { meta: metaStamp({ updatedAtCounter: 1 }) }
-    )
+    const base = row({ updatedAt: 't1', writerId: 'd1' }, { meta: metaStamp() })
     expect(handler.isEqual(base, { ...base })).toBe(true)
     expect(handler.isEqual(base, { ...base, meta: undefined })).toBe(false)
     for (const overrides of [
@@ -229,20 +226,17 @@ describe('makeLwwConflictHandler', () => {
       expect(
         handler.isEqual(base, {
           ...base,
-          meta: metaStamp({ updatedAtCounter: 1, ...overrides })
+          meta: metaStamp(overrides)
         })
       ).toBe(false)
     }
   })
 
   it('isEqual compares meta canonically, not by identity or key order', () => {
-    const base = row(
-      { updatedAt: 't1', writerId: 'd1' },
-      { meta: metaStamp({ updatedAtCounter: 1 }) }
-    )
+    const base = row({ updatedAt: 't1', writerId: 'd1' }, { meta: metaStamp() })
     const distinct = {
       ...base,
-      meta: { ...metaStamp({ updatedAtCounter: 1 }) }
+      meta: metaStamp()
     }
     expect(distinct.meta).not.toBe(base.meta)
     expect(handler.isEqual(base, distinct)).toBe(true)
@@ -258,7 +252,7 @@ describe('makeLwwConflictHandler', () => {
     expect(handler.isEqual(base, reordered)).toBe(true)
     const extra = {
       ...base,
-      meta: { ...metaStamp({ updatedAtCounter: 1 }), added: 'later' }
+      meta: { ...metaStamp(), added: 'later' }
     } as unknown as WithDeleted<SyncedDoc>
     expect(handler.isEqual(base, extra)).toBe(false)
   })
@@ -372,7 +366,7 @@ describe('makeLwwConflictHandler', () => {
     const payload = { updatedAt: 'T', writerId: 'dA' }
     const assumed = row(payload, {
       counter: 3,
-      meta: metaStamp({ updatedAtCounter: 1 }),
+      meta: metaStamp(),
       custom: { jwe: 'C0' }
     })
     const primary = row(payload, {
@@ -382,7 +376,7 @@ describe('makeLwwConflictHandler', () => {
     })
     const localEdit = row(payload, {
       counter: 3,
-      meta: metaStamp({ updatedAtCounter: 1 }),
+      meta: metaStamp(),
       custom: { jwe: 'Cb' }
     })
     const winner = await handler.resolve({
@@ -401,19 +395,19 @@ describe('makeLwwConflictHandler', () => {
     const payload = { updatedAt: '2026-02-02T00:00:00Z', writerId: 'dB' }
     const assumed = row(payload, {
       counter: 0,
-      meta: metaStamp({ updatedAtCounter: 1 }),
+      meta: metaStamp(),
       custom: { jwe: 'C0' }
     })
     const primary = row(payload, {
       counter: 1,
-      meta: metaStamp({ updatedAtCounter: 1 }),
+      meta: metaStamp(),
       custom: { jwe: 'C0' }
     })
     const edit = row(
       { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
       {
         counter: 0,
-        meta: metaStamp({ updatedAtCounter: 1 }),
+        meta: metaStamp(),
         custom: { jwe: 'C0' }
       }
     )
@@ -433,7 +427,7 @@ describe('makeLwwConflictHandler', () => {
     const assumed = row(payload, {
       counter: 1,
       originId: 'o1',
-      meta: metaStamp({ updatedAtCounter: 1 }),
+      meta: metaStamp(),
       custom: { jwe: 'C0' }
     })
     const variants = [
@@ -447,7 +441,7 @@ describe('makeLwwConflictHandler', () => {
       const primary = row(payload, {
         counter: 1,
         originId: 'o1',
-        meta: metaStamp({ updatedAtCounter: 1 }),
+        meta: metaStamp(),
         custom: { jwe: 'C0' },
         ...variant
       })
@@ -473,7 +467,7 @@ describe('makeLwwConflictHandler', () => {
       custom: { jwe: 'C0' }
     })
     for (const stamps of [
-      { counter: 1, originId: 'o0', meta: metaStamp({ updatedAtCounter: 1 }) },
+      { counter: 1, originId: 'o0', meta: metaStamp() },
       { counter: 9, originId: 'o9', meta: metaStamp({ updatedAtCounter: 9 }) },
       {}
     ]) {
@@ -499,7 +493,7 @@ describe('makeLwwConflictHandler', () => {
     const primary = row(payload, { counter: 2, originId: 'o2' })
     const edit = row(
       { updatedAt: '2026-01-01T00:00:00Z', writerId: 'dA' },
-      { counter: 1, originId: 'o1', meta: metaStamp({ updatedAtCounter: 1 }) }
+      { counter: 1, originId: 'o1', meta: metaStamp() }
     )
     const winner = await handler.resolve({
       realMasterState: primary,
@@ -509,7 +503,7 @@ describe('makeLwwConflictHandler', () => {
     expect(winner).toBe(edit)
     expect(winner.updatedAtCounter).toBe(1)
     expect(winner.originId).toBe('o1')
-    expect(winner.meta).toEqual(metaStamp({ updatedAtCounter: 1 }))
+    expect(winner.meta).toEqual(metaStamp())
   })
 
   it('adopts an undecryptable primary rather than re-pushing the older local payload', async () => {

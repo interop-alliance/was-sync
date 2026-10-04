@@ -330,9 +330,19 @@ export function createSyncController({
         }
         replications.push(entry)
 
+        // `active$` is a BehaviorSubject(false), so subscribing replays `false`
+        // synchronously. That replay is not a completed cycle: translating it
+        // would report `synced` over the `idle` just set, for a session that
+        // has replicated nothing. The first `synced` follows a `true`.
+        let cycleSeen = false
         entry.subscriptions.push(
           state.active$.subscribe(active => {
-            onStatus(key, id, active ? 'syncing' : 'synced')
+            if (active) {
+              cycleSeen = true
+              onStatus(key, id, 'syncing')
+            } else if (cycleSeen) {
+              onStatus(key, id, 'synced')
+            }
           }),
           state.error$.subscribe(err => {
             log.error('Sync error for collection', { id, err })

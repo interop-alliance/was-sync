@@ -889,3 +889,24 @@ fixes (the content ack supplies the top-level triple, the `/meta` ack supplies
 `meta`, neither partial). WAS-96 needs two amendments for this: a wire item for
 the write response body, and an explicit sentence that a `/meta`-only write
 leaves the content record's `updatedAt` unchanged.
+
+### WS-8: Status reports `synced` before any pull or push has run
+
+- status: done
+- done: 2026-10-04
+- priority: medium
+- labels: controller, status, correctness
+- acceptance:
+  - [x] The controller does not translate the initial replayed `active$` value
+        into `synced`; the first `synced` follows a completed cycle
+  - [x] The controller test's fake replication replays `false` on subscribe the
+        way RxDB's `BehaviorSubject` does, and the test asserts the status
+        sequence `idle` then (`syncing` | `error`) with no early `synced`
+
+Context: RxDB's `state.active$` is a `BehaviorSubject(false)`, so subscribing at
+`src/controller.ts:327` replays `false` synchronously and the handler reports
+`synced`, overwriting the `idle` set two lines earlier. With the WAS server
+unreachable the app's indicator shows `synced` for a session that has replicated
+nothing, until the first `error$` emission after the network attempt times out.
+The controller test's fake replication does not replay, so the suite cannot see
+it.

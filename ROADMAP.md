@@ -384,26 +384,6 @@ live copy another replica holds may now be on another server, and the tombstone
 this delete writes propagates to every peer. The priority should move to high
 once a consumer runs against a replicated Space.
 
-### WS-8: Status reports `synced` before any pull or push has run
-
-- status: todo
-- priority: medium
-- labels: controller, status, correctness
-- acceptance:
-  - [ ] The controller does not translate the initial replayed `active$` value
-        into `synced`; the first `synced` follows a completed cycle
-  - [ ] The controller test's fake replication replays `false` on subscribe the
-        way RxDB's `BehaviorSubject` does, and the test asserts the status
-        sequence `idle` then (`syncing` | `error`) with no early `synced`
-
-Context: RxDB's `state.active$` is a `BehaviorSubject(false)`, so subscribing at
-`src/controller.ts:327` replays `false` synchronously and the handler reports
-`synced`, overwriting the `idle` set two lines earlier. With the WAS server
-unreachable the app's indicator shows `synced` for a session that has replicated
-nothing, until the first `error$` emission after the network attempt times out.
-The controller test's fake replication does not replay, so the suite cannot see
-it.
-
 ### WS-9: The feed-walk memo only helps rows earlier in the feed than the first walked id
 
 - status: todo

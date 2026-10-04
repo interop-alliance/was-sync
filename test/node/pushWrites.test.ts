@@ -626,12 +626,12 @@ describe('createPushHandler conflicts', () => {
         updatedAt: '2026-03-03T00:00:00Z',
         updatedAtCounter: 0,
         originId: 'origin-b',
-        meta: {
+        meta: metaStamp({
           updatedAt: '2026-03-03T00:00:00Z',
           updatedAtCounter: 7,
           originId: 'origin-b',
           generation: 'gen-b'
-        },
+        }),
         metaEtag: metaEtagFor(6),
         etag: etagFor(3),
         data: { a: 1 },

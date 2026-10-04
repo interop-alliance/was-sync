@@ -15,6 +15,7 @@ import { getRxStorageMemory } from 'rxdb/plugins/storage-memory'
 import { createWasReplication } from '../../src/wasReplication.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
 import type { WasSyncPort, WireDoc } from '../../src/types.js'
+import { metaStamp, wire } from './fixtures.js'
 
 let db: RxDatabase | undefined
 
@@ -35,26 +36,20 @@ function ackPort({
   contentAck: { etag?: string }
   metaAck: { etag?: string }
 }) {
-  const doc: WireDoc = {
+  const doc: WireDoc = wire({
     id: 'doc-0',
-    kind: 'resource',
-    contentType: 'application/json',
-    _deleted: false,
-    updatedAt: '2026-01-01T00:00:00Z',
     updatedAtCounter: 3,
-    originId: 'origin-a',
     etag: '"g.3"',
-    meta: {
-      updatedAt: '2026-01-01T00:00:00Z',
+    meta: metaStamp({
       updatedAtCounter: 2,
       originId: 'origin-b',
       generation: 'gen-1'
-    },
+    }),
     metaEtag: '"m.2"',
     checkpoint: 'opaque:0',
     data: { n: 0 },
     custom: { tag: 'a' }
-  }
+  })
   return {
     doc,
     async query({ checkpoint }: Parameters<WasSyncPort['query']>[0]) {

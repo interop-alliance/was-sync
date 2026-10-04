@@ -8,7 +8,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { WasSyncCheckpointError } from '@interop/was-client/sync'
 import { createPullHandler, wireDocToRxDoc } from '../../src/changesQuery.js'
-import { wire } from './fixtures.js'
+import { metaStamp, wire } from './fixtures.js'
 import type {
   SyncCheckpoint,
   SyncedDoc,
@@ -67,12 +67,12 @@ describe('wireDocToRxDoc', () => {
   })
 
   it('carries the nested meta stamp and the custom envelope when present', () => {
-    const meta = {
+    const meta = metaStamp({
       updatedAt: '2026-01-01T00:00:05Z',
       updatedAtCounter: 0,
       originId: 'origin-b',
       generation: 'gen-1'
-    }
+    })
     const doc = wire({
       id: 'abc',
       meta,

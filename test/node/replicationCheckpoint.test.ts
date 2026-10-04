@@ -18,6 +18,7 @@ import { WasSyncCheckpointError } from '@interop/was-client/sync'
 import { createWasReplication } from '../../src/wasReplication.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
 import type { SyncCheckpoint, WasSyncPort, WireDoc } from '../../src/types.js'
+import { wire } from './fixtures.js'
 
 let db: RxDatabase | undefined
 
@@ -34,17 +35,15 @@ afterEach(async () => {
 function fakeFeedPort(count: number): WasSyncPort & {
   calls: Array<{ checkpoint?: SyncCheckpoint; limit: number }>
 } {
-  const docs: WireDoc[] = Array.from({ length: count }, (_, index) => ({
-    id: `doc-${index}`,
-    _deleted: false,
-    updatedAt: `2026-01-01T00:00:${String(index).padStart(2, '0')}Z`,
-    kind: 'resource',
-    contentType: 'application/json',
-    updatedAtCounter: 0,
-    originId: 'origin-a',
-    checkpoint: `opaque:${index}`,
-    data: { index }
-  }))
+  const docs: WireDoc[] = Array.from({ length: count }, (_, index) =>
+    wire({
+      id: `doc-${index}`,
+      updatedAt: `2026-01-01T00:00:${String(index).padStart(2, '0')}Z`,
+      updatedAtCounter: 0,
+      checkpoint: `opaque:${index}`,
+      data: { index }
+    })
+  )
   const calls: Array<{ checkpoint?: SyncCheckpoint; limit: number }> = []
   return {
     calls,

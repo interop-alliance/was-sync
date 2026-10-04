@@ -9,7 +9,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { withFeedPrimaryRead } from '../../src/feedPrimaryPort.js'
-import { wire } from './fixtures.js'
+import { metaStamp, wire } from './fixtures.js'
 import type {
   PrimaryReadCache,
   SyncCheckpoint,
@@ -143,12 +143,12 @@ describe('withFeedPrimaryRead get', () => {
   })
 
   it('carries the nested meta stamp verbatim into the primary state', async () => {
-    const meta = {
+    const meta = metaStamp({
       updatedAt: '2026-01-01T00:00:05Z',
       updatedAtCounter: 0,
       originId: 'origin-b',
       generation: 'gen-1'
-    }
+    })
     const base = fakeBasePort({
       pages: [[wire({ id: 'r1', data: { a: 1 }, meta })]]
     })

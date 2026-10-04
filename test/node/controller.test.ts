@@ -5,11 +5,11 @@
  * Controller-core unit tests, one per reconciled lifecycle decision: the
  * terminal stop latch, the start-failure unwind that rethrows without latching,
  * registration before subscription, the both-keys status callback, the
- * uncovered-collection skip, the auth escalation, the remote-change
- * subscription, the no-op reSync on a stopping instance, the default
- * replication identifier, the sync port each replication is handed, the poll
- * rate and online unsubscription, and the stop that resolves after every
- * cancel.
+ * no-`synced`-before-a-cycle rule, the uncovered-collection skip, the auth
+ * escalation, the remote-change subscription, the no-op reSync on a stopping
+ * instance, the default replication identifier, the sync port each replication
+ * is handed, the poll rate and online unsubscription, and the stop that
+ * resolves after every cancel.
  *
  * `createWasReplication` is mocked, so no RxDB database is opened here: the
  * subject is the lifecycle around the replication states, not the states
@@ -34,9 +34,11 @@ const { createSyncController, isAuthError } =
 
 /**
  * A minimal observable: `subscribe` records the callback and returns an
- * unsubscribe, `emit` fires every live callback.
+ * unsubscribe, `emit` fires every live callback. With `replay` set, every
+ * subscribe synchronously receives that value first, the way RxDB's
+ * `BehaviorSubject` streams do.
  */
-function stream<Value>(): {
+function stream<Value>(replay?: { value: Value }): {
   subscribe: (handler: (value: Value) => void) => { unsubscribe: () => void }
   emit: (value: Value) => void
   live: () => number
@@ -45,6 +47,9 @@ function stream<Value>(): {
   return {
     subscribe(handler) {
       handlers.add(handler)
+      if (replay !== undefined) {
+        handler(replay.value)
+      }
       return {
         unsubscribe() {
           handlers.delete(handler)
@@ -62,14 +67,16 @@ function stream<Value>(): {
 
 /**
  * A stand-in for one `RxReplicationState`, with its two observed streams, a
- * `cancel` that records its call order, and a `reSync` spy. The cancel records
- * only after a macrotask deferral, the way RxDB's own `cancel()` awaits its
- * queues, so a caller that does not await it finishes before the record lands.
+ * `cancel` that records its call order, and a `reSync` spy. `active$` replays
+ * `false` on subscribe, as RxDB's `BehaviorSubject(false)` does. The cancel
+ * records only after a macrotask deferral, the way RxDB's own `cancel()` awaits
+ * its queues, so a caller that does not await it finishes before the record
+ * lands.
  */
 function fakeReplication(cancelOrder: string[], name: string) {
   return {
     name,
-    active$: stream<boolean>(),
+    active$: stream<boolean>({ value: false }),
     error$: stream<unknown>(),
     reSync: vi.fn(),
     cancel: vi.fn(async () => {
@@ -233,6 +240,9 @@ describe('createSyncController lifecycle', () => {
     })
     await controller.start()
 
+    // The replayed `false` on subscribe is not a completed cycle, so the
+    // status stays at `idle` until the first `true`.
+    expect(statuses).toEqual([['wallet-notes', 'notes', 'idle']])
     replication.active$.emit(true)
     replication.active$.emit(false)
     expect(statuses).toEqual([
@@ -240,6 +250,30 @@ describe('createSyncController lifecycle', () => {
       ['wallet-notes', 'notes', 'syncing'],
       ['wallet-notes', 'notes', 'synced']
     ])
+    await controller.stop()
+  })
+
+  it('does not report synced before any cycle has run', async () => {
+    const cancelOrder: string[] = []
+    const replication = fakeReplication(cancelOrder, 'notes')
+    createWasReplication.mockReturnValue(replication)
+    const statuses: string[] = []
+    const controller = createSyncController({
+      port: {
+        wasClient,
+        spaceId: 'space-1',
+        serverUrl: 'https://was.example',
+        collections: [{ key: 'notes', id: 'notes' }],
+        rxCollection: (() => fakeRxCollection()) as never
+      },
+      onStatus: (_key, _id, status) => statuses.push(status),
+      pollMs: 0
+    })
+    await controller.start()
+    // A session whose first network attempt fails: the replayed `false`, then
+    // `error$`, with no `synced` in between.
+    replication.error$.emit(new Error('unreachable'))
+    expect(statuses).toEqual(['idle', 'error'])
     await controller.stop()
   })
 

@@ -21,6 +21,9 @@
   conditional write echoes the validator. The ack write-back patches validators
   only. An accepted write whose `ETag` is hidden from a cross-origin caller
   carries neither and acks nothing (WS-7, WS-18).
+- The controller no longer reports `synced` on the replayed initial `active$`
+  value. A collection stays at `idle` until its first cycle starts, so a session
+  whose server is unreachable shows `idle` then `error`, not `synced` (WS-8).
 
 ### Changed
 
@@ -42,8 +45,10 @@
     `_deleted: true`.
   - The `/meta` write is an update when the assumed primary is not a tombstone
     and carries `meta` or `metaEtag`. A tombstone sends `If-None-Match: *`.
-  - Requires `@interop/was-client` >= 0.89.0, the new peer range. The
-    integration suite runs against was-teaching-server 0.41.1 (WS-23).
+  - Requires `@interop/was-client` >= 0.89.1, the new peer range. The
+    `ResourceMetaStamp` type is was-client's own, re-exported from the root
+    entry. The integration suite runs against was-teaching-server 0.41.1
+    (WS-23).
 - Docs: ARCHITECTURE.md records that was-client's sync port (0.89.0) filters the
   widened `changes` feed. It hands on JSON Resources and their tombstones only,
   with `deleted` renamed `_deleted`, so the pull handler and the feed primary
