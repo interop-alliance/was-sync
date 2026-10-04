@@ -261,28 +261,6 @@ write-back patch the content ack onto the top-level triple and the `/meta` ack
 onto `meta` as units, so the unit rule follows from the shape rather than from
 per-member routing in `recordAck` and the write-back.
 
-### WS-19: `pushRow` never sees `_deleted` under a non-default `deletedField`
-
-- status: todo
-- priority: medium
-- labels: push, correctness, rxdb
-- acceptance:
-  - [ ] The push handler reads the deleted flag under the `deletedField` the
-        replication was configured with, or `createWasReplication` rejects a
-        non-default `deletedField`
-  - [ ] A unit case drives the handler with a non-default field and asserts the
-        delete branch fires
-
-Context: `createWasReplication` accepts a `deletedField` option and hands it to
-RxDB. RxDB's replication plugin swaps `_deleted` for that field on every row
-before the push handler sees it (`swapDefaultDeletedTodeletedField`), but
-`pushRow` branches on `newDocumentState._deleted`. With any field other than the
-default the delete branch never fires and a local delete is pushed as a content
-write of the tombstone's body. Nothing exercises the option today, so the gap is
-latent.
-
-discovered-from: WS-17
-
 ### WS-20: A foreign state pulled during this replica's own push window is dropped
 
 - status: todo

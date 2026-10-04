@@ -27,6 +27,11 @@
 
 ### Changed
 
+- **BREAKING**: `createWasReplication` no longer accepts `deletedField`. The
+  push handler, the conflict entries, and the feed primary read all branch on
+  `_deleted`, so under any other field a local delete was pushed as a content
+  write of the tombstone's body. The replication always runs under RxDB's
+  default `_deleted` (WS-19).
 - **BREAKING**: the replica schema and `SyncedDoc` carry the server's write
   stamp in place of the integer revisions. `version` and `metaVersion` are gone.
   `updatedAtCounter`, `originId`, and the nested `meta` (`updatedAt`,

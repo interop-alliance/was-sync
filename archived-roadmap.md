@@ -910,3 +910,28 @@ unreachable the app's indicator shows `synced` for a session that has replicated
 nothing, until the first `error$` emission after the network attempt times out.
 The controller test's fake replication does not replay, so the suite cannot see
 it.
+
+### WS-19: `pushRow` never sees `_deleted` under a non-default `deletedField`
+
+- status: done
+- done: 2026-10-04
+- priority: medium
+- labels: push, correctness, rxdb
+- acceptance:
+  - [x] The push handler reads the deleted flag under the `deletedField` the
+        replication was configured with, or `createWasReplication` rejects a
+        non-default `deletedField` (resolved by removing the option: the
+        replication always runs under RxDB's default `_deleted`)
+  - [x] A unit case holds the returned replication state to `_deleted` and the
+        option absent from the signature (in place of driving the handler with a
+        non-default field, which no longer exists)
+
+Context: `createWasReplication` accepts a `deletedField` option and hands it to
+RxDB. RxDB's replication plugin swaps `_deleted` for that field on every row
+before the push handler sees it (`swapDefaultDeletedTodeletedField`), but
+`pushRow` branches on `newDocumentState._deleted`. With any field other than the
+default the delete branch never fires and a local delete is pushed as a content
+write of the tombstone's body. Nothing exercises the option today, so the gap is
+latent.
+
+discovered-from: WS-17

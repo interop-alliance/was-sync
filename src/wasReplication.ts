@@ -81,7 +81,6 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
  * @param [options.retryTime] {number}    ms backoff between failed cycles
  * @param [options.live] {boolean}        ongoing (default true) vs one-shot
  * @param [options.autoStart] {boolean}   start immediately (default true)
- * @param [options.deletedField] {string} RxDB deleted flag (default `_deleted`)
  * @param [options.writerId] {string}    this replica's writer-attribution
  *   label (the WAS `writerId`), minted and kept app-side. The driver never
  *   mints, persists, or derives one. When present, every content write and
@@ -103,7 +102,6 @@ export function createWasReplication({
   retryTime,
   live = true,
   autoStart = true,
-  deletedField = '_deleted',
   writerId
 }: {
   rxCollection: RxCollection<SyncedDoc>
@@ -113,13 +111,14 @@ export function createWasReplication({
   retryTime?: number
   live?: boolean
   autoStart?: boolean
-  deletedField?: string
   writerId?: string
 }): RxReplicationState<SyncedDoc, ReplicationCheckpoint> {
   return replicateRxCollection<SyncedDoc, ReplicationCheckpoint>({
     replicationIdentifier,
     collection: rxCollection,
-    deletedField,
+    // The driver reads and writes `_deleted` everywhere (push rows, conflict
+    // entries, the feed primary read), so RxDB's default `deletedField` is the
+    // only one it can run under; the option is not exposed.
     live,
     autoStart,
     ...(retryTime !== undefined && { retryTime }),
