@@ -1001,3 +1001,51 @@ replicating under delete-wins and Resources byte-identical across replicas, the
 live copy another replica holds may now be on another server, and the tombstone
 this delete writes propagates to every peer. The priority should move to high
 once a consumer runs against a replicated Space.
+
+### WS-21: A dropped echo on a hidden-`ETag` deployment leaves the next `PUT` unconditional
+
+- status: done
+- done: 2026-10-04
+- priority: medium
+- labels: push, ack, conditional-writes, correctness
+- touches:
+  - wallet-attached-storage-spec: WASS-54 (a MUST that `ETag` and `Location` are
+    named in `Access-Control-Expose-Headers`; no validator members in the write
+    response body)
+  - unaffected: was-client (`WriteAck` already reads the `ETag` header)
+  - was-teaching-server: already exposes `ETag` and `Location`
+  - was-conformance-suite: PWSCS-24
+- acceptance:
+  - [x] The fix is decided and filed where it lands: the spec requires `ETag`
+        exposed cross-origin, so a hidden-`ETag` server is non-conforming
+  - [x] ARCHITECTURE.md states that the driver keeps the hidden-`ETag` path as
+        best-effort, and that an echo dropped there leaves the next content edit
+        unconditional
+
+Context: When a server does not expose `ETag` to a cross-origin caller, the ack
+carries no validator and the row learns it only from the feed echo. That is the
+deployment `withFeedPrimaryRead` exists for, and the one was-react always runs.
+If the echo is pulled inside the WS-17 window it is dropped, the row keeps no
+validator, and the next content edit goes out without an `If-Match`, which would
+overwrite a concurrent writer's content with no `412` for the resolver to see.
+WS-17 deliberately does not widen this: on that deployment its write-back stamps
+nothing (the ack carries no validator), so no new window opens, and the
+validators stay out of the body. The candidate fix is `etag` / `metaEtag`
+members in the write response body, following the changes-feed precedent; the
+spec says a Resource's version is exposed only as an `ETag`, so that is a wire
+decision for the user.
+
+discovered-from: WS-17
+
+WAS-96 keeps the problem and removes the shortcut. Its validator is
+`<generation>.<ms>.<counter>.<originId>`, and its wire item 12 puts the
+generation inside the `ETag` only, so even a write response body carrying the
+three stamp members (WS-17 under WS-23) cannot rebuild the validator a
+hidden-`ETag` deployment is missing. The fix has to carry `etag` and `metaEtag`
+members in the body outright, which stays the wire decision above.
+
+Resolution (2026-10-04): closed as a spec conformance matter. The spec's CORS
+requirements named only `Link` in `Access-Control-Expose-Headers`, so the
+validator the conditional-write design rests on was optional cross-origin.
+WASS-54 adds `ETag` and `Location` to that requirement; the write response body
+gains no validator members, and the driver code is unchanged.

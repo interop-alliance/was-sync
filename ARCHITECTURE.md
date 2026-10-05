@@ -326,6 +326,11 @@ numbered so items and reviews can cite them.
     nothing, so that deployment gets no new window), and a write-back failure
     that was logged and swallowed.
 
+    The WAS spec is to require a server to expose `ETag` cross-origin, so a
+    hidden-`ETag` server is non-conforming. The driver still handles it on a
+    best-effort basis. On such a server an echo dropped in the window leaves the
+    row without a validator, and its next content edit goes out unconditional.
+
 ## Ownership heuristics
 
 - **A WAS request, an error class, or a wire name** belongs to

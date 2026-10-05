@@ -10,6 +10,13 @@
   writer's record or a changed body surfaces as a conflict. An absent or
   tombstoned re-read is read as already gone (WS-22).
 
+### Changed
+
+- The hidden-`ETag` echo-drop case is closed as a spec conformance matter. The
+  WAS spec is to require `ETag` exposed cross-origin. The driver's hidden-`ETag`
+  path stays as best-effort for non-conforming servers, and no validator members
+  are added to the write body (WS-21).
+
 ## 0.8.0 - 2026-10-04
 
 ### Fixed

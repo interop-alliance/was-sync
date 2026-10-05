@@ -268,44 +268,6 @@ Unchanged by WAS-96: its open point 2 keeps two stamp sets per Resource, so
 `/meta` stays independently versioned and the race above stays reachable. The
 "validators differ" rule would compare the nested `meta` stamp under WS-23.
 
-### WS-21: A dropped echo on a hidden-`ETag` deployment leaves the next `PUT` unconditional
-
-- status: todo
-- priority: medium
-- labels: push, ack, conditional-writes, correctness
-- touches:
-  - wallet-attached-storage-spec (validator members in the write response body,
-    if that is the fix; a wire decision)
-  - was-client (`WriteAck` reads them)
-  - was-teaching-server, was-conformance-suite
-- acceptance:
-  - [ ] A row created against a server whose `ETag` header is not exposed
-        cross-origin ends with the server's validator even when its echo was
-        dropped inside the window
-  - [ ] The next content edit of that row sends an `If-Match`
-
-Context: When a server does not expose `ETag` to a cross-origin caller, the ack
-carries no validator and the row learns it only from the feed echo. That is the
-deployment `withFeedPrimaryRead` exists for, and the one was-react always runs.
-If the echo is pulled inside the WS-17 window it is dropped, the row keeps no
-validator, and the next content edit goes out without an `If-Match`, which would
-overwrite a concurrent writer's content with no `412` for the resolver to see.
-WS-17 deliberately does not widen this: on that deployment its write-back stamps
-nothing (the ack carries no validator), so no new window opens, and the
-validators stay out of the body. The candidate fix is `etag` / `metaEtag`
-members in the write response body, following the changes-feed precedent; the
-spec says a Resource's version is exposed only as an `ETag`, so that is a wire
-decision for the user.
-
-discovered-from: WS-17
-
-WAS-96 keeps the problem and removes the shortcut. Its validator is
-`<generation>.<ms>.<counter>.<originId>`, and its wire item 12 puts the
-generation inside the `ETag` only, so even a write response body carrying the
-three stamp members (WS-17 under WS-23) cannot rebuild the validator a
-hidden-`ETag` deployment is missing. The fix has to carry `etag` and `metaEtag`
-members in the body outright, which stays the wire decision above.
-
 ### WS-9: The feed-walk memo only helps rows earlier in the feed than the first walked id
 
 - status: todo
