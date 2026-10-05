@@ -17,23 +17,112 @@ import {
   type RxReplicationState
 } from 'rxdb/plugins/replication'
 import type { RxCollection } from 'rxdb/plugins/core'
+import { isMetaStamp, isWriteStamp } from '@interop/was-client/sync'
 import type { ReplicationCheckpoint, SyncedDoc, WasSyncPort } from './types.js'
+import { bodiesEqual } from './types.js'
+import { statesEqual } from './conflictHandler.js'
+import { syncedDocSchema } from './syncedDocSchema.js'
 import { createPullHandler } from './changesQuery.js'
 import { createPushHandler, type PushWriteAck } from './pushWrites.js'
 import { log } from './log.js'
 
+const schemaProperties: Record<string, unknown> = syncedDocSchema().properties
+const metaProperties: Record<string, unknown> =
+  (schemaProperties.meta as { properties?: Record<string, unknown> })
+    .properties ?? {}
+
 /**
- * Builds the push write-back: patches an accepted write's acked validators
- * (`etag` and/or `metaEtag`) into the local row so the next conditional write's
- * `If-Match` echoes what the server last reported. Skips rows that are gone or
- * already current (a tombstoned row is invisible to `findOne` and needs no
- * write-back -- nothing further is pushed for a deleted id). Nothing else is
- * patched: the ack carries no stamp, so the write's stamp reaches the row from
- * the feed's echo or a conflict entry (an ack that does carry one patches it
- * as a unit beside its validator, the content ack the top-level triple and the
- * `/meta` ack `meta`). A failure is logged at `warn` and swallowed: the write
- * itself succeeded, and a missed write-back only means the acked state is
- * adopted from the change feed's echo on a later pull.
+ * Whether every string member of an acked record fits the `maxLength` its
+ * schema property declares, so a patch carrying it cannot be refused by a
+ * validating storage and lose the validators patched beside it. A member with
+ * no bound fits anything; the first member that does not fit is logged at
+ * `debug`.
+ *
+ * @param options {object}
+ * @param options.id {string}   the row, for the log entry
+ * @param options.members {object}   the acked members, by schema property name
+ * @param [options.properties] {Record<string, unknown>}   the schema
+ *   properties to check against; the top-level ones by default
+ * @returns {boolean}
+ */
+function fitsSchema({
+  id,
+  members,
+  properties = schemaProperties
+}: {
+  id: string
+  members: object
+  properties?: Record<string, unknown>
+}): boolean {
+  for (const [member, value] of Object.entries(members)) {
+    const bound = (properties[member] as { maxLength?: unknown } | undefined)
+      ?.maxLength
+    if (
+      typeof value === 'string' &&
+      typeof bound === 'number' &&
+      value.length > bound
+    ) {
+      log.debug('Acked member exceeds the schema bound; not patched', {
+        id,
+        member
+      })
+      return false
+    }
+  }
+  return true
+}
+
+/**
+ * Copies onto `patch` each member of `candidate` the row does not already
+ * hold, so a row that is already current gets no patch and no follow-up push
+ * cycle.
+ *
+ * @param options {object}
+ * @param options.patch {Record<string, unknown>}
+ * @param options.current {SyncedDoc}   the row as stored
+ * @param options.candidate {Partial<SyncedDoc>}   the acked members
+ */
+function assignDiffering({
+  patch,
+  current,
+  candidate
+}: {
+  patch: Record<string, unknown>
+  current: SyncedDoc
+  candidate: Partial<SyncedDoc>
+}): void {
+  for (const [member, value] of Object.entries(candidate)) {
+    if (!bodiesEqual(current[member as keyof SyncedDoc], value)) {
+      patch[member] = value
+    }
+  }
+}
+
+/**
+ * Builds the push write-back: patches an accepted write's acked state into the
+ * local row so the next conditional write's `If-Match` echoes what the server
+ * last reported, and so the row holds what the server assigned without waiting
+ * for the feed echo. Skips rows that are gone or already current (a tombstoned
+ * row is invisible to `findOne` and needs no write-back -- nothing further is
+ * pushed for a deleted id).
+ *
+ * The validators (`etag` from the content ack, `metaEtag` from the `/meta`
+ * ack) are patched whenever present. The stamp members ride beside them under
+ * three conditions. A member is patched only from an ack that also carries a
+ * validator: a hidden-`ETag` deployment, where the echo has to land anyway,
+ * gets no write-back it did not have. Each stamp is patched as a unit: the
+ * content ack supplies the top-level triple and `createdBy`, the `/meta` ack
+ * supplies `meta`, and the two are not mixed, so the `/meta` ack's own copy of
+ * the content stamp is ignored. And the content stamp is patched only while
+ * the row still holds the state that was pushed ({@link statesEqual}), so a
+ * local edit made during the push keeps its own stamp even when the edit left
+ * `updatedAt` alone (the validators are patched regardless). A member longer
+ * than the schema allows is skipped at `debug`, so the single patch cannot
+ * throw on it. Everything lands in one `incrementalPatch`.
+ *
+ * A failure is logged at `warn` and swallowed: the write itself succeeded, and
+ * a missed write-back only means the acked state is adopted from the change
+ * feed's echo on a later pull.
  *
  * @param rxCollection {RxCollection<SyncedDoc>}
  * @returns {(ack: PushWriteAck) => Promise<void>}
@@ -45,12 +134,42 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
       if (doc === null) {
         return
       }
-      const patch: Partial<SyncedDoc> = {}
-      if (ack.etag !== undefined && doc.get('etag') !== ack.etag) {
-        patch.etag = ack.etag
+      const { id, content, meta } = ack
+      // A read-only snapshot, compared and never mutated.
+      const current = doc.toJSON() as SyncedDoc
+      const patch: Record<string, unknown> = {}
+      if (content?.etag !== undefined) {
+        const { etag, createdBy } = content
+        const candidate: Partial<SyncedDoc> = { etag }
+        // The stamp is patched whole or not at all; a partial one is left out.
+        // `toJSON()` strips `_deleted`; a row `findOne` returned is live.
+        if (
+          isWriteStamp(content) &&
+          statesEqual({ ...current, _deleted: false }, ack.pushedState)
+        ) {
+          const { updatedAt, updatedAtCounter, originId } = content
+          const stamp = { updatedAt, updatedAtCounter, originId }
+          if (fitsSchema({ id, members: stamp })) {
+            Object.assign(candidate, stamp)
+          }
+        }
+        if (
+          createdBy !== undefined &&
+          fitsSchema({ id, members: { createdBy } })
+        ) {
+          candidate.createdBy = createdBy
+        }
+        assignDiffering({ patch, current, candidate })
       }
-      if (ack.metaEtag !== undefined && doc.get('metaEtag') !== ack.metaEtag) {
-        patch.metaEtag = ack.metaEtag
+      if (meta?.etag !== undefined) {
+        const candidate: Partial<SyncedDoc> = { metaEtag: meta.etag }
+        if (
+          isMetaStamp(meta.meta) &&
+          fitsSchema({ id, members: meta.meta, properties: metaProperties })
+        ) {
+          candidate.meta = meta.meta
+        }
+        assignDiffering({ patch, current, candidate })
       }
       if (Object.keys(patch).length > 0) {
         await doc.incrementalPatch(patch)
@@ -58,7 +177,7 @@ function createAckWriteBack(rxCollection: RxCollection<SyncedDoc>) {
     } catch (err) {
       // Best-effort: the server write was accepted; the feed's echo on the
       // next pull corrects the row if this local patch could not be applied.
-      log.warn('Could not write the acked validator back into the local row', {
+      log.warn('Could not write the acked state back into the local row', {
         id: ack.id,
         err
       })

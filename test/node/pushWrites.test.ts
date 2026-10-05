@@ -59,6 +59,34 @@ function metaEtagFor(count: number): string {
  */
 const contentStamp = { updatedAtCounter: 3, originId: 'origin-a' }
 
+/**
+ * A reported {@link PushWriteAck} for a {@link newDoc} row: the row id and the
+ * port acks the writes earned, kept whole. The pushed row is matched on its
+ * id alone; the echo of the full pushed state has its own test.
+ *
+ * @param options {object}
+ * @param [options.id] {string}
+ * @param [options.content] {WriteAck}
+ * @param [options.meta] {WriteAck}
+ * @returns {PushWriteAck}
+ */
+function ackOf({
+  id = 'r1',
+  content,
+  meta
+}: {
+  id?: string
+  content?: WriteAck
+  meta?: WriteAck
+}): PushWriteAck {
+  return {
+    id,
+    pushedState: expect.objectContaining({ id }) as WithDeleted<SyncedDoc>,
+    ...(content !== undefined && { content }),
+    ...(meta !== undefined && { meta })
+  }
+}
+
 type WriteCall =
   | {
       kind: 'putContent'
@@ -788,7 +816,9 @@ describe('createPushHandler write acks', () => {
     ])
 
     expect(conflicts).toEqual([])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(1) } })
+    ])
   })
 
   it('echoes the acked etag verbatim as If-Match on the next update push', async () => {
@@ -804,11 +834,13 @@ describe('createPushHandler write acks', () => {
     // Create: the server acks its etag; the caller writes it back into the
     // row, so the next push's assumed primary carries that etag.
     await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(1) } })
+    ])
     const [createAck] = acks
     const writtenBack = newDoc({
       id: 'r1',
-      etag: createAck!.etag!,
+      etag: createAck!.content!.etag!,
       data: { a: 1 }
     })
 
@@ -827,7 +859,9 @@ describe('createPushHandler write acks', () => {
       data: { a: 2 },
       ifMatch: etagFor(1)
     })
-    expect(acks[1]).toStrictEqual({ id: 'r1', etag: etagFor(2) })
+    expect(acks[1]).toStrictEqual(
+      ackOf({ id: 'r1', content: { etag: etagFor(2) } })
+    )
   })
 
   it('reports the acked metaEtag on a metadata write', async () => {
@@ -855,7 +889,9 @@ describe('createPushHandler write acks', () => {
       }
     ])
 
-    expect(acks).toStrictEqual([{ id: 'r1', metaEtag: metaEtagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', meta: { etag: metaEtagFor(1) } })
+    ])
   })
 
   it('does not report an ack for a delete whose response carries no ETag', async () => {
@@ -884,19 +920,25 @@ describe('createPushHandler write acks', () => {
       acked: 'both validators',
       contentAck: { etag: etagFor(1) },
       metaAck: { etag: metaEtagFor(1) },
-      expected: [{ id: 'r1', etag: etagFor(1), metaEtag: metaEtagFor(1) }]
+      expected: [
+        ackOf({
+          id: 'r1',
+          content: { etag: etagFor(1) },
+          meta: { etag: metaEtagFor(1) }
+        })
+      ]
     },
     {
       acked: 'the content etag alone',
       contentAck: { etag: etagFor(1) },
       metaAck: {},
-      expected: [{ id: 'r1', etag: etagFor(1) }]
+      expected: [ackOf({ id: 'r1', content: { etag: etagFor(1) } })]
     },
     {
       acked: 'the metaEtag alone',
       contentAck: {},
       metaAck: { etag: metaEtagFor(1) },
-      expected: [{ id: 'r1', metaEtag: metaEtagFor(1) }]
+      expected: [ackOf({ id: 'r1', meta: { etag: metaEtagFor(1) } })]
     },
     {
       acked: 'no validator (no ETag on either response)',
@@ -1008,7 +1050,9 @@ describe('createPushHandler write acks', () => {
     expect(port.writes).toEqual([
       { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(7) }
     ])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(8) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(8) } })
+    ])
   })
 
   it('keeps only the content ack when the metadata write resolves no ack', async () => {
@@ -1043,7 +1087,135 @@ describe('createPushHandler write acks', () => {
       'putContent',
       'putMeta'
     ])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(1) } })
+    ])
+  })
+
+  it('reports the content ack whole: the stamp and createdBy beside the etag', async () => {
+    // A server that answers the write with a body acks the write's stamp and
+    // the creator it recorded; the port ack is handed over as a unit.
+    const port = fakePushPort()
+    const contentAck: WriteAck = {
+      etag: etagFor(1),
+      updatedAt: '2026-01-01T00:00:01Z',
+      ...contentStamp,
+      createdBy: 'did:key:z6MkCreator'
+    }
+    port.putContent = async putOptions => {
+      port.writes.push({ kind: 'putContent', ...putOptions })
+      return contentAck
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    await push([{ newDocumentState: newDoc({ id: 'r1', data: { a: 1 } }) }])
+
+    expect(acks).toStrictEqual([ackOf({ content: contentAck })])
+  })
+
+  it('reports the /meta ack whole beside the content ack, each from its own write', async () => {
+    const port = fakePushPort()
+    const metaAck: WriteAck = {
+      etag: metaEtagFor(1),
+      updatedAt: '2026-01-01T00:00:01Z',
+      ...contentStamp,
+      meta: metaStamp({ generation: 'gen-1' })
+    }
+    port.putMeta = async metaOptions => {
+      port.writes.push({ kind: 'putMeta', ...metaOptions })
+      return metaAck
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          data: { a: 1 },
+          custom: { tag: 'x' }
+        })
+      }
+    ])
+
+    expect(acks).toStrictEqual([
+      ackOf({ content: { etag: etagFor(1) }, meta: metaAck })
+    ])
+  })
+
+  it('does not count a /meta ack that carries a stamp but no validator', async () => {
+    // A `/meta` response whose body reached the client while its `ETag` did
+    // not acks no validator, so with no content write there is no ack at all.
+    const port = fakePushPort()
+    port.putMeta = async metaOptions => {
+      port.writes.push({ kind: 'putMeta', ...metaOptions })
+      return {
+        updatedAt: '2026-01-01T00:00:01Z',
+        ...contentStamp,
+        meta: metaStamp({ generation: 'gen-1' })
+      }
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    const conflicts = await push([
+      {
+        assumedMasterState: newDoc({
+          data: { a: 1 },
+          metaEtag: metaEtagFor(0)
+        }),
+        newDocumentState: newDoc({ data: { a: 1 }, custom: { tag: 'y' } })
+      }
+    ])
+
+    expect(conflicts).toEqual([])
+    expect(port.writes.map(write => write.kind)).toEqual(['putMeta'])
+    expect(acks).toEqual([])
+  })
+
+  it('reports the pushed updatedAt of the row as it went out', async () => {
+    const port = fakePushPort()
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    await push([
+      {
+        newDocumentState: newDoc({
+          id: 'r1',
+          updatedAt: '2026-03-03T00:00:00Z',
+          data: { a: 1 }
+        })
+      }
+    ])
+
+    expect(acks.map(ack => ack.pushedState)).toEqual([
+      newDoc({
+        id: 'r1',
+        updatedAt: '2026-03-03T00:00:00Z',
+        data: { a: 1 }
+      })
+    ])
   })
 
   it('propagates an onWriteAccepted rejection out of push', async () => {
@@ -1090,11 +1262,13 @@ describe('createPushHandler write acks', () => {
     expect(acks).toEqual([])
   })
 
-  it('keeps the content ack when the following metadata write 412s', async () => {
+  it('hands no ack to onWriteAccepted when the following metadata write 412s', async () => {
     // The content half was ACCEPTED (the server holds the new content) before
-    // the /meta half conflicted. Discarding that ack would leave the local row
-    // holding the pre-write validator and 412 on every later conditional
-    // write, so the conflict and the ack are reported together.
+    // the /meta half conflicted. The conflict entry carries the fresh
+    // validators and RxDB records it as the assumed primary, so the next write
+    // conditions on it; a write-back on the row would collide with RxDB's
+    // conflict fork write and discard the resolver's decision, so the callback
+    // is not invoked for the row.
     const port = fakePushPort({
       conflictOn: { kind: 'putMeta', id: 'r1' },
       primary: {
@@ -1129,7 +1303,7 @@ describe('createPushHandler write acks', () => {
       'putMeta'
     ])
     expect(conflicts).toHaveLength(1)
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toEqual([])
   })
 })
 
@@ -1170,7 +1344,9 @@ describe('createPushHandler tombstoned assumed primary', () => {
       { kind: 'putContent', id: 'r1', data: { a: 2 }, ifNoneMatch: true }
     ])
     expect(port.getCalls).toEqual([])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(1) } })
+    ])
   })
 
   it('re-creates a tombstone conflict entry that carries no etag', async () => {
@@ -1221,7 +1397,8 @@ describe('createPushHandler metadata 404 corroboration', () => {
     // Under WAS 404-masking a /meta 404 is ambiguous. An independent re-read
     // says the resource is absent, so this was an ordinary race with a remote
     // delete: report a tombstone conflict (which the conflict handler settles)
-    // instead of throwing and wedging the batch. The content ack survives.
+    // instead of throwing and wedging the batch. The row returned a conflict
+    // entry, so its content ack is not handed to `onWriteAccepted`.
     const port = fakePushPort({
       auth404On: { kind: 'putMeta', id: 'r1' },
       primary: null
@@ -1252,7 +1429,7 @@ describe('createPushHandler metadata 404 corroboration', () => {
         _deleted: true
       }
     ])
-    expect(acks).toStrictEqual([{ id: 'r1', etag: etagFor(1) }])
+    expect(acks).toEqual([])
   })
 
   it('resolves as a conflict when the re-read primary is already a tombstone', async () => {
@@ -1907,7 +2084,9 @@ describe('createPushHandler benign delete retry', () => {
         }
       ])
       expect(port.getCalls).toEqual([])
-      expect(acks).toStrictEqual([{ id: 'sibling', etag: etagFor(1) }])
+      expect(acks).toStrictEqual([
+        ackOf({ id: 'sibling', content: { etag: etagFor(1) } })
+      ])
       // The skip is a swallow point the seam makes visible, at debug.
       expect(capture.events).toHaveLength(1)
       expect(capture.events[0]).toMatchObject({
@@ -1969,7 +2148,9 @@ describe('createPushHandler delete of an absent resource', () => {
     // Already gone is the goal state, not a conflict: nothing is re-read.
     expect(port.getCalls).toEqual([])
     // No validator is acked for the absent row; the sibling's create is.
-    expect(acks).toStrictEqual([{ id: 'sibling', etag: etagFor(1) }])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'sibling', content: { etag: etagFor(1) } })
+    ])
   })
 
   it('treats a not-found on the benign-412 re-issued delete as already gone', async () => {

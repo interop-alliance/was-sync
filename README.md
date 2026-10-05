@@ -26,8 +26,10 @@ the checkpoint rule, routing each local change to the content endpoint, the
 metadata endpoint, or a delete, assembling the conflict entry RxDB asks for when
 a conditional write is refused with `412`, recovering the one benign `412` (a
 delete refused on a drifted validator whose body is unchanged), writing each
-accepted write's acked validator back into the local row, and running one
-replication per collection for a session behind a serialized start and stop.
+accepted write's acked state (the validator, and the write's stamp and
+`createdBy` when the server answers with a body) back into the local row, and
+running one replication per collection for a session behind a serialized start
+and stop.
 
 It was extracted from the two copies that had drifted apart in
 `@interop/was-react` and in the Freewallet browser wallet, neither of which may

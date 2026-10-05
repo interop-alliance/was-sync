@@ -238,12 +238,12 @@ function committed(record: { etag?: string } | null): boolean {
 
 /**
  * Whether a local row holds the server's content write stamp as the observer
- * reads it. The ack carries a validator alone, so the feed echo is the only
- * source of `updatedAtCounter` and `originId`: a row whose pair is defined and
- * equal to the primary's has had an echo land. The top-level `updatedAt` is
- * compared too. The server's value replaces the app's on the echo, and the
+ * reads it. The stamp reaches the row from the write ack (the server answers
+ * the write with a body) or from the feed echo; either way a row whose pair is
+ * defined and equal to the primary's holds the server's state. The top-level
+ * `updatedAt` is compared too. The server's value replaces the app's, and the
  * server reuses one origin and often counter `0`, so the pair alone cannot
- * tell the echo of an edit from the state the row held before it.
+ * tell the stamp of an edit from the state the row held before it.
  */
 function holdsServerStamp(
   local: Pick<SyncedDoc, 'updatedAt' | 'updatedAtCounter' | 'originId'> | null,
@@ -276,8 +276,10 @@ async function localRow(
  * A nudge that pulls only once every pending push has settled. RxDB drops a
  * pulled state while a local write is pending on the row and still moves the
  * checkpoint on, and the ack write-back is such a write until the push cycle
- * it triggers has run (WS-17). A barrier that waits on the echo would then
- * wait for a feed change that never comes.
+ * it triggers has run. The ack carries the server state, so a dropped echo
+ * costs the row nothing, but a barrier that waits on a member only the echo
+ * brings (a feed-only `writerId`, say) would wait for a feed change that never
+ * comes.
  */
 function settledReSync(replication: {
   awaitInSync(): Promise<boolean>
@@ -622,15 +624,11 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     const primary = await observer.get({ id: 'cid-author' })
     expect(primary?.createdBy).toBe(controllerDid)
 
-    // The echo of that write comes back down the feed carrying what the
-    // server alone assigns, and lands in the local row: by then the ack
-    // write-back has stamped `etag`, so only `createdBy` and the server's
-    // write stamp are left to differ, and the default `isEqual` has to see
-    // them. No pull is nudged until the pushes have settled (`awaitInSync`):
-    // RxDB defers a pulled state behind a pending local write while its
-    // checkpoint moves on, and the ack write-back is such a write until the
-    // push cycle it triggers has run (WS-17).
-    await replication.awaitInSync()
+    // The server answers the write with a body, so the ack write-back stamps
+    // `createdBy` and the write stamp beside `etag`. A pull nudged while the
+    // push may still be in flight is harmless: whether RxDB writes the echo or
+    // drops it behind the pending write-back, the row ends up holding the
+    // server's state.
     replication.reSync()
     await replication.awaitInSync()
     const local = (await collection.findOne('cid-author').exec())?.toJSON()
@@ -643,7 +641,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
-  it("lands the server's write stamp on a created row from its echo, with no meta until a /meta write", async () => {
+  it("lands the server's write stamp on a created row from its ack, with no meta until a /meta write", async () => {
     const collection = await openCollection()
     const { port, observer } = await openServerCollection()
     const replication = createWasReplication({
@@ -666,25 +664,22 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await eventually(async () =>
       committed(await observer.get({ id: 'cid-stamp' }))
     )
-    // The ack writes back the validator alone, so the stamp is still absent
-    // once the write-back has landed.
+    // The ack writes back the stamp beside the validator, with no pull
+    // nudged: the row holds the server's stamp once the write-back has landed.
     await eventually(
       async () => (await localRow(collection, 'cid-stamp'))?.etag !== undefined
     )
     await replication.awaitInSync()
-    const acked = await localRow(collection, 'cid-stamp')
-    expect('updatedAtCounter' in acked!).toBe(false)
-    expect('originId' in acked!).toBe(false)
+    expect(
+      holdsServerStamp(
+        await localRow(collection, 'cid-stamp'),
+        await observer.get({ id: 'cid-stamp' })
+      )
+    ).toBe(true)
 
-    // The echo brings the stamp down.
-    await eventually(
-      async () =>
-        holdsServerStamp(
-          await localRow(collection, 'cid-stamp'),
-          await observer.get({ id: 'cid-stamp' })
-        ),
-      settledReSync(replication)
-    )
+    // The echo then changes nothing.
+    replication.reSync()
+    await replication.awaitInSync()
     const primary = await observer.get({ id: 'cid-stamp' })
     const local = await localRow(collection, 'cid-stamp')
     expect(local!.updatedAtCounter).toBeTypeOf('number')
@@ -777,9 +772,9 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
   })
 
   it('pushes a custom edit made after the /meta ack and before its echo with If-Match, and no 412', async () => {
-    // A `/meta` ack brings `metaEtag` and no `meta`, so between this
-    // replica's own `/meta` write and its echo the row holds the validator
-    // alone. The next metadata edit must route as an update on that
+    // Between this replica's own `/meta` write and its echo the row holds
+    // what the ack brought: `metaEtag`, and from a body-answering server the
+    // `meta` stamp. The next metadata edit must route as an update on that
     // validator, not as a create the server would refuse.
     let conflicts = 0
     const collection = await openCollection({
@@ -827,10 +822,9 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     // acked row as the assumed primary.
     await replication.awaitInSync()
     const acked = await localRow(collection, 'cid-pre-echo')
-    expect('meta' in acked!).toBe(false)
-    expect(acked!.metaEtag).toBe(
-      (await observer.get({ id: 'cid-pre-echo' }))?.metaEtag
-    )
+    const ackedPrimary = await observer.get({ id: 'cid-pre-echo' })
+    expect(acked!.metaEtag).toBe(ackedPrimary?.metaEtag)
+    expect(acked!.meta).toEqual(ackedPrimary?.meta)
 
     await (await collection.findOne('cid-pre-echo').exec())!.incrementalPatch({
       custom: { name: 'Second', tags: {} },
@@ -1702,10 +1696,7 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
       updatedAt: '000000000001',
       data: { from: 'own-doomed' }
     })
-    // No pull is nudged while A's pushes are in flight: RxDB defers a pulled
-    // state behind a pending local write while its checkpoint moves on, and
-    // the ack write-back is such a write until the push cycle it triggers has
-    // run (WS-17). The pushes alone bring the server up to date.
+    // The pushes alone bring the server up to date.
     await eventually(
       async () =>
         committed(await observer.get({ id: 'cid-own' })) &&
@@ -1722,8 +1713,8 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await eventually(
       async () => (await observer.get({ id: 'cid-own-gone' })) === null
     )
-    // A's own echoes come back down the feed once its pushes have settled.
-    await replicationA.awaitInSync()
+    // A's own echoes come back down the feed; the ack already stamped what
+    // they carry, so the nudge needs no wait for the pushes to settle.
     replicationA.reSync()
     await replicationA.awaitInSync()
     await replicationA.cancel()
@@ -1762,5 +1753,138 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     for (const doc of withLabel) {
       expect('writerId' in doc).toBe(false)
     }
+  })
+
+  it('holds the server state from the ack when the echo is pulled into the write-back window and dropped', async () => {
+    // The forced window. RxDB admits a nudged pull only once the running push
+    // has finished, so the pull lands in the gap the ack write-back opens: the
+    // row has been patched locally and the push cycle that records the patch
+    // as the assumed primary has not completed. To hold that cycle open, the
+    // row is edited during the first push, so the second push carries a real
+    // content write whose response the test holds. The pull returns the echo
+    // while the second push is in flight, RxDB drops it behind the pending
+    // local write and moves the checkpoint past it, and the ack of the held
+    // write is the only source left for what the server assigned.
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    let release: () => void = () => {}
+    const held = new Promise<void>(resolve => {
+      release = resolve
+    })
+    let contentWrites = 0
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      contentWrites += 1
+      const write = contentWrites
+      const ack = await rawPut(options)
+      if (write === 1) {
+        // Edit the row while its first push is in flight, and queue the pull
+        // so it fires the moment this push finishes.
+        await (await collection.findOne(options.id).exec())!.incrementalPatch({
+          data: { hello: 'again' },
+          updatedAt: '000000000002'
+        })
+        replication.reSync()
+      } else {
+        await held
+      }
+      return ack
+    }
+    const echoed: string[] = []
+    const rawQuery = port.query.bind(port)
+    port.query = async options => {
+      const page = await rawQuery(options)
+      echoed.push(...page.documents.map(document => document.id))
+      return page
+    }
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-forced-window'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-window',
+      updatedAt: '000000000001',
+      data: { hello: 'world' }
+    })
+    // The pull handler returns the echo while the second write is held.
+    await eventually(async () => echoed.includes('cid-window'))
+    expect(contentWrites).toBe(2)
+    // Give the downstream its turn with the batch, then check the drop: the
+    // row still holds the edit's own `updatedAt` and no server stamp. (The
+    // first ack already stamped `createdBy`; its stamp was for the superseded
+    // state and was skipped, so the stamp is what only the echo could have
+    // brought here.)
+    await new Promise(resolve => setTimeout(resolve, 150))
+    const dropped = await localRow(collection, 'cid-window')
+    expect(dropped?.updatedAt).toBe('000000000002')
+    expect('updatedAtCounter' in dropped!).toBe(false)
+    expect('originId' in dropped!).toBe(false)
+
+    release()
+    await replication.awaitInSync()
+    // No further pull: what the row holds now came from the acks alone.
+    const primary = await observer.get({ id: 'cid-window' })
+    const local = await localRow(collection, 'cid-window')
+    expect(local?.data).toEqual({ hello: 'again' })
+    expect(local?.createdBy).toBe(controllerDid)
+    expect(local?.updatedAt).toBe(primary?.updatedAt)
+    expect(local?.updatedAtCounter).toBe(primary?.updatedAtCounter)
+    expect(local?.originId).toBe(primary?.originId)
+    expect(local?.etag).toBe(primary?.etag)
+    expect(errors).toEqual([])
+
+    await replication.cancel()
+  })
+
+  it("lands the resolver's choice when another replica deletes between the content write and the /meta write", async () => {
+    // A create carrying `custom` is two writes. Another replica deletes the
+    // resource after the content write lands and before the `/meta` write, so
+    // the `/meta` write 404s, the re-read corroborates the tombstone, and the
+    // row is handed to the resolver with the tombstone as the conflict entry.
+    // The default resolver takes the remote side: the local row is deleted
+    // and no second content write re-creates the resource over the tombstone.
+    let conflicts = 0
+    const collection = await openCollection({
+      onConflict: () => (conflicts += 1)
+    })
+    const { port, observer } = await openServerCollection()
+    const { contentWrites, metaWrites } = recordPreconditionsOn(port)
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      const ack = await rawPut(options)
+      await observer.deleteContent({ id: options.id, ifMatch: ack.etag })
+      return ack
+    }
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-meta-tombstone-race'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-meta-race',
+      updatedAt: '000000000001',
+      data: { hello: 'world' },
+      custom: { name: 'Mine', tags: {} }
+    })
+    await eventually(
+      async () => (await localRow(collection, 'cid-meta-race')) === null
+    )
+    await replication.awaitInSync()
+    await replication.cancel()
+
+    expect(conflicts).toBe(1)
+    expect(contentWrites).toEqual([{ ifNoneMatch: true }])
+    expect(metaWrites).toEqual([{ ifNoneMatch: true }])
+    expect(await observer.get({ id: 'cid-meta-race' })).toBeNull()
+    expect(errors).toEqual([])
   })
 })

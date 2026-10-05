@@ -1,14 +1,16 @@
 # WS-17: The ack carries the server state (design)
 
 - item: WS-17
-- status: reviewed
-- approved:
+- status: approved
+- approved: 2026-10-04
 - wire-level decisions contained: listed in section 5 (the write response status
   and body, and the fresh-provenance rule for a resurrection), signed off by the
   user on 2026-10-02; the body shape and the statuses were revised the same day
   after the review pass, and the resurrection rule was added 2026-10-03 after
   the completeness pass
-- decision records extracted: none yet (candidates listed in section 6)
+- decision records extracted: [decisions/0003](../decisions/0003-ack-write-back-carries-server-state.md)
+  (the write-back is the delivery, the conflict array and a post-write re-read
+  are not)
 
 Note: sections 4, 5, and 7 describe the revision rules (`version` /
 `metaVersion`, the `0` skip). WS-23's design
@@ -248,6 +250,17 @@ them (A), the write response status and body (B).
 
 ## 5. Design
 
+Revised at approval (2026-10-04) to the stamp model: where the text below
+names `updatedAt` / `createdBy` as the acked members, read the content write's
+whole stamp (`updatedAt`, `updatedAtCounter`, `originId`) plus `createdBy`, and
+for a `/meta` write the nested `meta` stamp, each patched as a unit under the
+WS-23 rule. `PushWriteAck` keeps each port ack whole
+(`{ id, pushedUpdatedAt, content?: WriteAck, meta?: WriteAck }`) instead of
+merging the two into renamed members, so the write-back patches the content ack
+onto the top-level triple and the `/meta` ack onto `meta` without per-member
+routing. The `/meta` ack's own top-level stamp members are not mixed onto the
+row. The revision rules (`version` absent or `0`) are gone with `version`.
+
 Driver (`src/pushWrites.ts`, `src/wasReplication.ts`). `PushWriteAck` gains
 `updatedAt?: string`, `createdBy?: string`, and `pushedUpdatedAt: string` (the
 pushed row's own `updatedAt`; an internal driver type, not wire). `pushRow`
@@ -395,6 +408,15 @@ its server devDependency returns to a registry version.
   the privacy claim true.
 
 ## 7. Test plan
+
+Implementation note (2026-10-04): RxDB admits a nudged pull only once the
+running push has finished (`downstream.js` waits on `active.up` before it
+queues the task), so the forced-window case cannot pull during the first
+write's HTTP round trip as planned below. It forces the write-back window
+instead: the row is edited during the first push, so the second push carries a
+content write whose response the test holds, and a pull queued during the first
+push fires when that push finishes and lands while the second is in flight. The
+drop is proved on the stamp, since the first ack already stamps `createdBy`.
 
 - `test/node/pushWrites.test.ts`: `pushRow` reports `updatedAt`, `createdBy`,
   and `pushedUpdatedAt` (the last `updatedAt` wins across a content write and a

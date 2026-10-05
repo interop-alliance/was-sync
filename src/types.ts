@@ -127,7 +127,8 @@ export interface OptionalBodyFields {
   /**
    * The server-managed creator DID, present once the server records one. It
    * rides the feed on a tombstone too, so it survives a delete. Read-only
-   * here: the push side never writes it, and it rides the conflict entry so a
+   * here: the push side sends nothing for it, the ack write-back adopts the
+   * one the create's ack carried, and it rides the conflict entry so a
    * resolved row keeps the creator the server recorded.
    */
   createdBy?: string
@@ -336,11 +337,14 @@ export interface PrimaryReadCache {
 
 /**
  * The acknowledgment a conditional write returns: the opaque `etag` validator
- * the accepted write earned, exactly as the server sent it. Pass it back
- * verbatim as a later write's `ifMatch`. It carries no stamp and no revision;
- * the write's stamp reaches the row from the feed's echo or a re-read primary.
- * `etag` is absent where the header did not reach the client; was-client's own
- * ack type, aliased here so the driver and the port agree by construction.
+ * the accepted write earned, exactly as the server sent it (pass it back
+ * verbatim as a later write's `ifMatch`), and, from a server that answers the
+ * write with a body, the write's stamp (`updatedAt`, `updatedAtCounter`,
+ * `originId`, copied whole or not at all), the `/meta` record's stamp under
+ * `meta` on a metadata write, and `createdBy` on a create. It carries no
+ * revision number. `etag` is absent where the header did not reach the client;
+ * was-client's own ack type, aliased here so the driver and the port agree by
+ * construction.
  */
 export type WriteAck = ClientWriteAck
 

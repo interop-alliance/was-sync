@@ -71,8 +71,9 @@ numbered so items and reviews can cite them.
    recorded. Two replicas therefore converge on the same rows without
    coordinating. The driver mints no `updatedAtCounter` or `originId` either.
    The only stamp member a local row carries before the server has seen it is
-   the app's own `updatedAt`. The two server-minted members reach a row from the
-   feed or a re-read primary only.
+   the app's own `updatedAt`. The two server-minted members, and `createdBy`,
+   reach a row from the write ack (a server that answers the write with a body),
+   the feed, or a re-read primary; the driver never fills them in.
 3. **Every content push carries the row's `Key-Epoch` header.** The epoch id
    rides `SyncedDoc.epoch` from the feed and back out through `putContent`; the
    header itself belongs to was-client's port. The driver runs no unknown-epoch
@@ -295,25 +296,28 @@ numbered so items and reviews can cite them.
     an absent member equals only an absent one. RxDB writes a pulled state into
     the local row only where `isEqual` says the two differ, and the echo of this
     replica's own write is where that matters. By the time the echo arrives, the
-    ack write-back has already stamped the row with the server's `etag` and
-    `metaEtag`, and nothing else (see Ack in the Glossary). What is left to
-    differ is what the server alone assigns, namely `createdBy`, the server's
-    `updatedAt`, `updatedAtCounter`, `originId`, and `meta`, so the echo is
-    written. An equality limited to the bodies and validators let RxDB skip the
-    echo. Every row a replica created then kept the client's `updatedAt` and
-    never learned its `createdBy` or a server stamp. An edited row's
-    `updatedAtCounter` and `originId` describe the last server state the row
-    learned, not the edit. The echo of the edit differs in them and replaces
-    that hybrid. A consumer that injects its own `isEqual` takes on the same
-    requirement. One timing window remains, tracked as WS-17. RxDB defers a
-    pulled state for a row whose local state differs from its assumed primary,
-    and the pull checkpoint still moves past it, so the deferred state is never
-    pulled again. The ack write-back is a plain local write, so the row is in
-    that state until the push cycle it triggers has run. An echo pulled inside
-    that window is dropped whatever `isEqual` says. The window holds no HTTP
-    round trip, so a polling pull rarely lands in it, but a pull nudged right
-    after a push does. The integration suite therefore waits for pushes to
-    settle before it nudges a pull.
+    ack write-back has stamped the row with the server's `etag` and `metaEtag`,
+    and, from a server that answers the write with a body, the write's stamp and
+    `createdBy` (see Ack in the Glossary). The echo then differs from the row
+    only in what the ack did not carry (a `meta` the content write did not
+    return, say) or in a stamp another writer has moved on, and RxDB writes it
+    only where `isEqual` says it differs. The full-member comparison stays:
+    against a server that answers `204`, the echo is still the only source of
+    `createdBy` and the server stamp, and an equality limited to the bodies and
+    validators would let RxDB skip it, leaving every row the replica created
+    with the client's `updatedAt` and no `createdBy`. A consumer that injects
+    its own `isEqual` takes on the same requirement. One timing window remains.
+    RxDB drops a pulled state for a row whose local state differs from its
+    assumed primary, and the pull checkpoint still moves past it. The ack
+    write-back is a plain local write, so the row is in that state until the
+    push cycle it triggers has run, and RxDB admits a nudged pull as soon as the
+    push that ran the write-back has finished, so a pull nudged during a push
+    lands in exactly that window. An echo dropped there costs nothing when the
+    ack carried what the echo would have brought. It stays load-bearing in three
+    cases: a server that answers `204` with no body, a hidden `ETag` (the
+    validators arrive only through the echo, and the write-back then stamps
+    nothing, so that deployment gets no new window), and a write-back failure
+    that was logged and swallowed.
 
 ## Ownership heuristics
 
@@ -404,20 +408,27 @@ the byoe-ecosystem layer map instead.
   server refused, which is what RxDB's push contract asks for. The tombstone
   variant (the re-read found no live resource) carries the local `updatedAt` and
   no other stamp member. Avoid: conflict result, rejection.
-- **Ack** -- the opaque `ETag` validators an accepted write earned
-  (`PushWriteAck`, `{ id, etag?, metaEtag? }`), written back into the local row
-  so the next conditional write's `If-Match` echoes what the server holds. The
-  write-back (`createAckWriteBack` in `src/wasReplication.ts`) patches those
-  validators and nothing else. The stamp reaches the row from the echo or from a
-  conflict entry. A validator alone is an ack: the push handler reports a write
-  accepted when `etag` or `metaEtag` is present, and an accepted write whose
-  `ETag` is hidden from a cross-origin caller carries neither and acks nothing.
-  Avoid: receipt, confirmation.
+- **Ack** -- the acked state an accepted write earned, each port ack kept whole
+  (`PushWriteAck`, `{ id, pushedState, content?, meta? }`), written back into
+  the local row so the next conditional write's `If-Match` echoes what the
+  server holds. Every ack carries the opaque `ETag` validator; an ack from a
+  server that answers the write with a body also carries the write's stamp, and
+  `createdBy` on a create. The write-back (`createAckWriteBack` in
+  `src/wasReplication.ts`) patches the validators, and the stamp as a unit
+  beside them: the content ack supplies the row's `updatedAt`,
+  `updatedAtCounter`, `originId`, and `createdBy`, the `/meta` ack supplies
+  `meta`, the two are not mixed, nothing is patched from an ack with no
+  validator, and the content stamp is patched only while the row still holds the
+  state it was pushed with, compared whole. A validator alone is an ack: the
+  push handler reports a write accepted when either ack carries an `etag`, and
+  an accepted write whose `ETag` is hidden from a cross-origin caller acks
+  nothing, whatever its body carried. A row that returned a conflict entry is
+  not written back. Avoid: receipt, confirmation.
 - **Echo** -- the `changes` feed entry for a write this replica pushed, pulled
-  back down on a later cycle. It is the only way what the server alone assigns
-  (`createdBy`, the server's `updatedAt`) reaches the local row, since the ack
-  carries only validators (invariant 18). The echo alone also brings the stamp
-  members (`updatedAtCounter`, `originId`, `meta`). Avoid: reflection, bounce.
+  back down on a later cycle. Against a server that answers a write with a body
+  it brings nothing the ack did not; against one that answers `204` it is the
+  only way what the server alone assigns (`createdBy`, the server's stamp,
+  `meta`) reaches the local row (invariant 18). Avoid: reflection, bounce.
 - **Writer id** -- an unkeyed, clearable attribution label saying which writing
   agent produced a write; it attributes history and breaks last-write-wins ties.
   On the wire it is the WAS `writerId`, a member of the content record alone,

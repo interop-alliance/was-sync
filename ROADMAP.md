@@ -106,17 +106,17 @@ be stated.
 
 ### WS-17: Echo pulled during the ack write-back window is dropped
 
-- status: todo
+- status: in-progress
 - priority: medium
 - labels: push, ack, pull, correctness, rxdb
 - design: designs/WS-17-ack-carries-server-state.md
-- design-approved:
+- design-approved: 2026-10-04
 - touches:
   - was-sync (ARCHITECTURE.md invariants 2 and 18, Glossary `Ack` / `Echo`,
     README)
-  - was-client (`WriteAck` gains `updatedAt` / `createdBy`; `writeAck` and
-    `putMeta` lift them from a `2xx` body behind a shape guard; `putMeta`
-    returns an ack with no validator; ARCHITECTURE/AGENTS)
+  - was-client: WCL-128, shipped in 0.90.0 (`WriteAck` carries the stamp,
+    `meta`, and `createdBy`, lifted from a `2xx` body behind a shape guard;
+    `putMeta` returns an ack with no validator)
   - was-teaching-server (`PUT /:id` answers `201` on create, a re-creation over
     a tombstone included, and `200` on update, `PUT /:id/meta` answers `200`,
     both with the server-managed-members body filled inside the write; a
@@ -148,34 +148,39 @@ be stated.
     bump; its fake ports return `{ version, etag }` and the new members are
     optional)
 - acceptance:
-  - [ ] The write response body carries the record's full stamp (`updatedAt`,
+  - [x] The write response body carries the record's full stamp (`updatedAt`,
         `updatedAtCounter`, `originId`; the nested `meta` on a `/meta` write)
         beside `createdBy` (decided 2026-10-03, the design doc's section 8
         option a), was-client's `WriteAck` carries the same members, and the ack
         write-back stamps them under WS-23's unit rule
-  - [ ] `PushWriteAck` carries `updatedAt` / `createdBy` / `pushedUpdatedAt`,
-        `pushRow` fills them from the port acks and the pushed row (the last
-        `updatedAt` wins), and `hasAck` does not count the two members on their
-        own
-  - [ ] `createPushHandler` calls `onWriteAccepted` only for a row that returned
+  - [x] `PushWriteAck` keeps each port ack whole
+        (`{ id, pushedUpdatedAt, content?, meta? }`), `pushRow` fills `content`
+        from the content write or delete and `meta` from the `/meta` write, and
+        `hasAck` counts a validator alone
+  - [x] `createPushHandler` calls `onWriteAccepted` only for a row that returned
         no conflict entry, with the content-then-`/meta` `412` and `404` cases
         pinned
-  - [ ] `createAckWriteBack` stamps `updatedAt` and `createdBy` alongside the
-        validators in the same `incrementalPatch`, only when the ack carries a
-        validator, only while the row's `updatedAt` equals `pushedUpdatedAt`,
-        and skipping a member longer than the schema allows
-  - [ ] A forced-window integration case holds the content write's response
-        until a nudged pull has returned the echo, asserts the row still lacks
-        `createdBy` before releasing it, and the row then ends with the server's
-        `createdBy`, `updatedAt`, `version`, and `etag`
-  - [ ] The two integration cases that wait for `awaitInSync` before nudging a
+  - [x] `createAckWriteBack` stamps the content stamp and `createdBy` from the
+        content ack and `meta` from the `/meta` ack alongside the validators in
+        the same `incrementalPatch`, only when the same ack carries a validator,
+        the content stamp only while the row's `updatedAt` equals
+        `pushedUpdatedAt`, and skipping a member longer than the schema allows
+  - [x] A forced-window integration case holds a content write's response until
+        a nudged pull has returned the echo into the write-back window, asserts
+        the row still lacks the server stamp before releasing it, and the row
+        then ends with the server's `createdBy`, stamp, and `etag` (the design
+        doc's section 7 note records why the window is forced at the write-back
+        rather than the first write)
+  - [x] The two integration cases that wait for `awaitInSync` before nudging a
         pull drop that wait
   - [ ] The was-client devDependency and peer floor move to the release that
-        widens `WriteAck`; the server devDependency comes from the registry
-  - [ ] ARCHITECTURE.md invariants 2 and 18 and the Glossary `Ack` / `Echo`
+        widens `WriteAck` (done: 0.90.1); the server devDependency comes from
+        the registry (it is `link:../was-teaching-server` until 0.42.0 is
+        published)
+  - [x] ARCHITECTURE.md invariants 2 and 18 and the Glossary `Ack` / `Echo`
         entries describe the ack as a source of the two members, with the three
         residuals named
-  - [ ] CHANGELOG.md entry
+  - [x] CHANGELOG.md entry
   - [ ] `touches:` entries resolved
 
 Context: After this replica pushes a row, the server's echo comes back down the

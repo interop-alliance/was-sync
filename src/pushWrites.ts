@@ -90,15 +90,22 @@
  * way. Revoked access still surfaces on the next feed pull.
  *
  * RxDB's push contract asks only for *conflicts* back (the current primary state
- * of each rejected row), so a successful write's new `etag` / `metaEtag`
- * validators are reported out-of-band: each accepted write's {@link WriteAck}
- * is captured and handed to the optional `onWriteAccepted` callback, which
- * writes the acked state back into the local row (see `createWasReplication`).
- * Without that write-back the local row would hold the pre-write validator and
- * every subsequent conditional write would send a stale `If-Match` and 412. The
- * write-back only touches the validator fields (never `data` / `updatedAt`), so
- * the follow-up push cycle it triggers finds nothing changed to write and
- * settles -- no re-push loop.
+ * of each rejected row), so a successful write's acked state is reported
+ * out-of-band: each accepted write's {@link WriteAck} is captured whole and
+ * handed to the optional `onWriteAccepted` callback, which writes the acked
+ * state back into the local row (see `createWasReplication`). Without that
+ * write-back the local row would hold the pre-write validator and every
+ * subsequent conditional write would send a stale `If-Match` and 412. The ack
+ * carries the new `etag` / `metaEtag` validators, and, from a server that
+ * answers the write with a body, the write's stamp and `createdBy`, so the row
+ * learns what the server assigned without waiting for the feed echo. The
+ * write-back never touches the bodies, so the follow-up push cycle it triggers
+ * finds nothing changed to write and settles -- no re-push loop. A row that
+ * returned a conflict entry earns no ack, even when its content half was
+ * accepted before the `/meta` half was refused: the conflict entry carries the
+ * fresh validators and RxDB records it as the assumed primary, while a
+ * write-back on such a row would collide with RxDB's conflict fork write and
+ * discard the resolver's decision.
  *
  * Every content write and delete carries the injected `writerId`, when one was
  * injected, as the `Writer-Id` header on `PUT /:id` and `DELETE /:id` (the WAS
@@ -144,17 +151,23 @@ function isMetaNotFound(err: unknown): boolean {
 }
 
 /**
- * The acked server state of one row's accepted writes: the new content `etag`
- * (from a `PUT /:id` or `DELETE /:id`) and/or the new `metaEtag` (from a
- * `PUT /:id/meta`). An absent field means the corresponding write did not run
- * or its response carried no `ETag`. Both are opaque -- echo them back verbatim
- * as a later write's `ifMatch`. The ack carries no stamp: the write's stamp
- * reaches the row from the feed's echo or a conflict entry.
+ * The acked server state of one row's accepted writes, each port ack kept
+ * whole: `content` from the `PUT /:id` or `DELETE /:id`, `meta` from the
+ * `PUT /:id/meta`. An absent member means the corresponding write did not run
+ * or its response carried nothing. Each ack's `etag` is opaque -- echo it back
+ * verbatim as a later write's `ifMatch`. An ack from a server that answers
+ * with a body also carries the write's stamp (and `createdBy` on a create),
+ * which the write-back patches as a unit beside the validator: the content
+ * ack onto the row's top-level stamp, the `/meta` ack's `meta` onto `meta`.
+ * `pushedState` is the row as it was pushed, so the write-back can tell a row
+ * that was edited again during the push (whether or not the edit moved
+ * `updatedAt`) and leave that edit's stamp alone.
  */
 export interface PushWriteAck {
   id: string
-  etag?: string
-  metaEtag?: string
+  pushedState: WithDeleted<SyncedDoc>
+  content?: WriteAck
+  meta?: WriteAck
 }
 
 /**
@@ -206,10 +219,11 @@ function primaryOrTombstone({
 /**
  * Sends one local change to the remote Collection as up to two conditional
  * writes (content, then metadata). Returns the primary-state conflict entry on a
- * `412` at either step, or the accepted writes' acked validators on success
- * (`ack: null` when no response carried one). A conflict on the metadata half
- * still returns the content half's earned ack alongside the conflict entry, so
- * an accepted content write's validator is never discarded.
+ * `412` at either step, or the accepted writes' acks on success (`ack: null`
+ * when no response carried a validator). A conflict on the metadata half
+ * returns the conflict entry alone: the content half's earned ack is dropped,
+ * since the conflict entry carries the fresh validators (the header's
+ * write-back note).
  *
  * @param options {object}
  * @param options.port {WasSyncPort}
@@ -253,12 +267,14 @@ async function pushRow({
   const assumedHasMeta =
     !assumedIsTombstone &&
     (assumedMasterState?.meta !== undefined || assumedMetaEtag !== undefined)
-  const ack: PushWriteAck = { id }
+  const ack: PushWriteAck = { id, pushedState: newDocumentState }
   // Spread into every content write and delete, so a replication run without
   // a label sends none.
   const attribution = writerId !== undefined ? { writerId } : {}
-  // A validator alone is acked state; a response with no `ETag` acks nothing.
-  const hasAck = () => ack.etag !== undefined || ack.metaEtag !== undefined
+  // A validator alone is acked state; a response with no `ETag` acks nothing,
+  // whatever stamp members its body carried.
+  const hasAck = () =>
+    ack.content?.etag !== undefined || ack.meta?.etag !== undefined
   // Set after each accepted write of this row, validator or not. A
   // hidden-`ETag` write is accepted with no validator, so `hasAck` cannot stand
   // in for it.
@@ -278,18 +294,16 @@ async function pushRow({
       ? port.get({ id })
       : port.get({ id, ...(cache !== undefined && { cache }) })
 
-  // Builds the conflict outcome from a re-read primary (or from its absence),
-  // PRESERVING any ack already earned: a content write accepted before a
-  // `/meta` 412 must keep its acked `etag`, or the local row keeps the
-  // pre-write validator and every later conditional write sends a stale
-  // `If-Match`.
+  // Builds the conflict outcome from a re-read primary (or from its absence).
+  // An ack already earned (a content write accepted before a `/meta` 412) is
+  // dropped: the conflict entry carries the fresh validators.
   const conflictOutcome = (primary: PrimaryState | null) => ({
     conflict: primaryOrTombstone({
       id,
       primary,
       fallbackUpdatedAt: newDocumentState.updatedAt
     }),
-    ack: hasAck() ? ack : null
+    ack: null
   })
 
   // The 412 path: re-read the resource, then report its real primary state.
@@ -367,14 +381,14 @@ async function pushRow({
     }
   }
 
-  // Records an accepted write's validator, if the response carried one.
+  // Records an accepted write's ack whole, if the response carried anything.
   const recordAck = (
-    member: 'etag' | 'metaEtag',
+    member: 'content' | 'meta',
     acked: WriteAck | undefined
   ): void => {
     wroteThisBatch = true
-    if (acked?.etag !== undefined) {
-      ack[member] = acked.etag
+    if (acked !== undefined && Object.keys(acked).length > 0) {
+      ack[member] = acked
     }
   }
 
@@ -387,7 +401,7 @@ async function pushRow({
         return { conflict: null, ack: null }
       }
       // Delete supersedes any metadata write: drop the content, tombstone wins.
-      recordAck('etag', await deleteWithBenignRetry())
+      recordAck('content', await deleteWithBenignRetry())
       return { conflict: null, ack: hasAck() ? ack : null }
     }
 
@@ -398,7 +412,7 @@ async function pushRow({
       isCreate || !bodiesEqual(newDocumentState.data, assumedMasterState?.data)
     if (contentChanged) {
       recordAck(
-        'etag',
+        'content',
         await port.putContent({
           id,
           data: newDocumentState.data ?? null,
@@ -433,7 +447,7 @@ async function pushRow({
   if (metadataChanged) {
     try {
       recordAck(
-        'metaEtag',
+        'meta',
         await port.putMeta({
           id,
           ...(newDocumentState.custom !== undefined && {
@@ -483,10 +497,10 @@ async function pushRow({
  * Rows are pushed concurrently; if any non-conflict error is thrown the whole
  * batch rejects (RxDB re-sends it later), matching RxDB's all-or-nothing retry.
  *
- * Each accepted write's acked validator(s) are handed to `onWriteAccepted`
- * (when supplied) as soon as that row's writes settle, so the caller can write
- * the new `etag` / `metaEtag` back into the local row and keep subsequent
- * conditional writes' `If-Match` in step with the server.
+ * Each accepted row's acks are handed to `onWriteAccepted` (when supplied) as
+ * soon as that row's writes settle, so the caller can write the acked state
+ * back into the local row and keep subsequent conditional writes' `If-Match`
+ * in step with the server.
  *
  * Each batch gets one short-lived primary-read memo, shared by its rows and
  * discarded with the batch (never held across batches, where it would go

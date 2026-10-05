@@ -9,13 +9,13 @@
  * RxDB via `deletedField`. `updatedAt`, `updatedAtCounter`, and `originId` are
  * the content record's write stamp as the server minted it; `updatedAt` alone
  * is required, since a fresh local row needs a wall-clock value for the index
- * before the server has stamped it, and the server's value replaces it on the
- * echo. `meta` is the `/meta` record's own stamp with its generation, stored
+ * before the server has stamped it, and the server's value replaces it from
+ * the write ack or the echo. `meta` is the `/meta` record's own stamp with its generation, stored
  * nested as the wire shapes it (decision 0002), absent until metadata has been
  * written and complete once present. `data` / `custom` are opaque bodies
  * (plaintext JSON, or an EDV envelope on an encrypted collection), so they are
- * typed as free-form objects. `createdBy` is the server-managed creator DID
- * carried down from the `changes` feed. `epoch` is the opaque key-epoch id the
+ * typed as free-form objects. `createdBy` is the server-managed creator DID,
+ * adopted from the create's ack or carried down from the `changes` feed. `epoch` is the opaque key-epoch id the
  * resource's envelope was encrypted under (absent = pre-epoch, encrypted
  * directly to the vault key), also carried down the feed. `etag` / `metaEtag`
  * are the opaque `ETag` validators the server last reported for the content and

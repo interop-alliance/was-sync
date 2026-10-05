@@ -95,15 +95,15 @@ export type ConflictWinner = 'local' | 'remote'
  * participates, the server-managed ones included. RxDB writes a pulled state
  * into the local row only where this says the two differ, and the feed echo of
  * this replica's own write is where that matters: the push-ack write-back has
- * already stamped the row with the server's `etag` / `metaEtag`, so by the time
- * the echo arrives it differs only in what the server alone assigns
+ * already stamped the row with the server's `etag` / `metaEtag`, and from a
+ * server that answers the write with a body the write's stamp and `createdBy`
+ * too, so by the time the echo arrives it differs only in what the ack did not
+ * carry or in a stamp another writer moved on. Against a server that answers
+ * `204` the echo is the only source of what the server alone assigns
  * (`createdBy`, its own `updatedAt`, `updatedAtCounter`, `originId`, and
- * `meta`). An equality that stopped at the bodies and validators would let RxDB
- * skip the echo, and every row this replica created would keep the client's
- * `updatedAt`, never learn its `createdBy`, and never hold a server stamp. An
- * edited row's `updatedAtCounter` and `originId` describe the last server
- * state the row learned, not the edit, so the echo of the edit differs in them
- * too and replaces the hybrid.
+ * `meta`), and an equality that stopped at the bodies and validators would let
+ * RxDB skip it, so every row this replica created would keep the client's
+ * `updatedAt`, never learn its `createdBy`, and never hold a server stamp.
  *
  * The bodies and `meta` compare canonically ({@link bodiesEqual}), so two
  * distinct but member-equal `meta` objects compare equal and a member the

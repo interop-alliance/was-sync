@@ -18,9 +18,24 @@
   that overrode `isEqual` with a deep equality to get this behavior can drop the
   override (WS-6).
 - An accepted write is acked on its `etag` / `metaEtag` alone, so the next
-  conditional write echoes the validator. The ack write-back patches validators
-  only. An accepted write whose `ETag` is hidden from a cross-origin caller
-  carries neither and acks nothing (WS-7, WS-18).
+  conditional write echoes the validator. An accepted write whose `ETag` is
+  hidden from a cross-origin caller carries neither and acks nothing (WS-7,
+  WS-18).
+- The ack write-back stamps the write's `updatedAt`, `updatedAtCounter`,
+  `originId`, and `createdBy` from the content ack, and `meta` from the `/meta`
+  ack, when the server answers the write with a body (was-teaching-server
+  0.42.0, `@interop/was-client` 0.90.0). Each stamp is patched as a unit beside
+  its validator, only while the row still holds the pushed state, and never from
+  an ack with no validator. A row this replica created no longer depends on the
+  feed echo for its `createdBy` and server stamp, so an echo RxDB drops behind
+  the pending write-back costs nothing. A row that earned a content ack and then
+  a `/meta` conflict in the same push is no longer written back; the write-back
+  collided with RxDB's conflict fork write and discarded the resolver's decision
+  (WS-17).
+- **BREAKING**: `PushWriteAck` keeps each port ack whole,
+  `{ id, pushedState, content?, meta? }`, in place of the merged
+  `{ id, etag?, metaEtag? }`. The `@interop/was-client` peer floor rises to
+  `0.90.2` (WS-17).
 - The controller no longer reports `synced` on the replayed initial `active$`
   value. A collection stays at `idle` until its first cycle starts, so a session
   whose server is unreachable shows `idle` then `error`, not `synced` (WS-8).
