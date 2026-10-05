@@ -5,9 +5,11 @@
  * Unit tests for the pull side of the sync adapter (the `changes`-feed mapping
  * and pull handler), driven by a fake WAS port -- no server, no RxDB engine.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { WasSyncCheckpointError } from '@interop/was-client/sync'
+import { captureLogger } from '@interop/logger'
 import { createPullHandler, wireDocToRxDoc } from '../../src/changesQuery.js'
+import { setLogger, type Logger } from '../../src/log.js'
 import { metaStamp, wire } from './fixtures.js'
 import type {
   SyncCheckpoint,
@@ -247,6 +249,23 @@ describe('createPullHandler', () => {
   const rejected = new WasSyncCheckpointError()
 
   /**
+   * The package's logging seam, captured per test and restored afterwards. A
+   * refused checkpoint is logged, so the restart cases would otherwise print
+   * through the console fallback.
+   */
+  let capture = captureLogger('sync')
+  let previousLogger: Logger
+
+  beforeEach(() => {
+    capture = captureLogger('sync')
+    previousLogger = setLogger(capture.logger)
+  })
+
+  afterEach(() => {
+    setLogger(previousLogger)
+  })
+
+  /**
    * A port that refuses every pull carrying a checkpoint and serves the one
    * page `documents` from the start of the feed.
    */
@@ -358,6 +377,20 @@ describe('createPullHandler', () => {
     expect(port.calls[2]).toEqual({ limit: 100 })
   })
 
+  it('logs one warn for the refused checkpoint, and none when the memoized refusal is skipped', async () => {
+    const pull = createPullHandler(refusingPort([]))
+
+    await pull({ checkpoint: 'issued-elsewhere' }, 100)
+    await pull({ checkpoint: 'issued-elsewhere' }, 100)
+
+    const warns = capture.events.filter(event => event.level === 'warn')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]!.msg).toMatch(/refused the stored checkpoint/)
+    // The capture logger lifts `data.err` to the event's top-level `err`.
+    expect(warns[0]!.err).toBe(rejected)
+    expect(capture.events).toHaveLength(1)
+  })
+
   it('matches the refusal by name, as from another copy of was-client', async () => {
     const foreign = Object.assign(new Error('refused elsewhere'), {
       name: 'WasSyncCheckpointError'
@@ -390,6 +423,9 @@ describe('createPullHandler', () => {
     const pull = createPullHandler(port)
 
     await expect(pull({ checkpoint: cpA }, 100)).rejects.toThrow('nope')
+    // Only a refused checkpoint is logged; any other failure is the caller's
+    // to report.
+    expect(capture.events).toEqual([])
   })
 
   it('returns undefined checkpoint on a first, empty pull', async () => {

@@ -21,6 +21,7 @@ import { createRxDatabase, type RxDatabase } from 'rxdb/plugins/core'
 import { getRxStorageMemory } from 'rxdb/plugins/storage-memory'
 import { openTempBackend, startTestServer } from 'was-teaching-server/testing'
 import { Ed25519VerificationKey } from '@interop/ed25519-verification-key'
+import { captureLogger } from '@interop/logger'
 import { WasClient } from '@interop/was-client'
 import {
   createWasSyncPort,
@@ -29,6 +30,7 @@ import {
   isSyncConflictError
 } from '@interop/was-client/sync'
 import { createWasReplication } from '../../src/wasReplication.js'
+import { setLogger } from '../../src/log.js'
 import { syncedDocSchema } from '../../src/syncedDocSchema.js'
 import {
   lwwResolver,
@@ -600,6 +602,127 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     )
 
     await replication.cancel()
+  })
+
+  it("keeps a row from a re-created Collection's previous generation, and re-creates it on the server only when edited", async () => {
+    // Pins WS-27. Deleting and re-creating the Collection mints a new feed
+    // generation, so the server refuses the stored checkpoint and the pull
+    // restarts the feed. The restart clears nothing. A row that only the
+    // previous generation held stays in the replica. It is not pushed back by
+    // itself. An edit pushes it back, and the 412 path re-creates it.
+    const capture = captureLogger('sync')
+    const previousLogger = setLogger(capture.logger)
+    try {
+      const collection = await openCollection({ lww: true })
+      const { port, observer } = await openServerCollection()
+      const { contentWrites } = recordPreconditionsOn(port)
+      const collectionId = `synced-${collectionSerial}`
+      const oldBody = {
+        step: 'old-1',
+        updatedAt: '2026-01-01T00:00:01Z',
+        writerId: 'b'
+      }
+      const oldLife = await observer.putContent({
+        id: 'cid-old-life',
+        data: oldBody
+      })
+
+      const replication = createWasReplication({
+        rxCollection: collection,
+        wasPort: port,
+        replicationIdentifier: 'test-recreated-collection'
+      })
+      const errors: unknown[] = []
+      replication.error$.subscribe(err => errors.push(err))
+      await replication.awaitInitialReplication()
+      expect((await localRow(collection, 'cid-old-life'))?.data).toEqual(
+        oldBody
+      )
+
+      // Delete the Collection and re-create it under the same id. The new
+      // life gets an observer of its own.
+      await was.space(spaceId).collection(collectionId).delete()
+      await ensureSpaceAndCollection({
+        was,
+        spaceId,
+        controllerDid,
+        collectionId,
+        encryption: 'plaintext'
+      })
+      const newObserver = createWasSyncPort({ was, spaceId, collectionId })
+      const newBody = {
+        step: 'new-1',
+        updatedAt: '2026-01-01T00:00:02Z',
+        writerId: 'b'
+      }
+      await newObserver.putContent({ id: 'cid-new-life', data: newBody })
+
+      // This pull carries the previous generation's checkpoint, which the
+      // server refuses; the handler restarts the feed.
+      await eventually(
+        async () => (await localRow(collection, 'cid-new-life')) !== null,
+        () => replication.reSync()
+      )
+      const refusals = capture.events.filter(
+        event =>
+          event.level === 'warn' &&
+          /refused the stored checkpoint/.test(event.msg)
+      )
+      expect(refusals).toHaveLength(1)
+
+      expect((await localRow(collection, 'cid-old-life'))?.data).toEqual(
+        oldBody
+      )
+      expect((await localRow(collection, 'cid-new-life'))?.data).toEqual(
+        newBody
+      )
+      expect(committed(await newObserver.get({ id: 'cid-new-life' }))).toBe(
+        true
+      )
+      expect(await newObserver.get({ id: 'cid-old-life' })).toBeNull()
+
+      // Settle once more. Nothing is pending for the lingering row, so it is
+      // not pushed back on its own.
+      await eventually(
+        async () => committed(await newObserver.get({ id: 'cid-new-life' })),
+        settledReSync(replication)
+      )
+      await replication.awaitInSync()
+      expect(await newObserver.get({ id: 'cid-old-life' })).toBeNull()
+      expect((await localRow(collection, 'cid-old-life'))?.data).toEqual(
+        oldBody
+      )
+      expect(contentWrites).toEqual([])
+
+      // An edit pushes it with the previous generation's etag. The 412
+      // re-read finds no primary, and the row is re-created on the server.
+      const editedBody = {
+        step: 'old-2',
+        updatedAt: '2026-01-01T00:00:03Z',
+        writerId: 'a'
+      }
+      await (await collection.findOne('cid-old-life').exec())!.incrementalPatch(
+        { data: editedBody, updatedAt: '000000000003' }
+      )
+      await eventually(
+        async () => committed(await newObserver.get({ id: 'cid-old-life' })),
+        () => replication.reSync()
+      )
+      expect((await newObserver.get({ id: 'cid-old-life' }))?.data).toEqual(
+        editedBody
+      )
+      // One refused update carrying the previous generation's etag, then
+      // exactly one create.
+      expect(contentWrites).toEqual([
+        { ifMatch: oldLife.etag },
+        { ifNoneMatch: true }
+      ])
+      expect(errors).toEqual([])
+
+      await replication.cancel()
+    } finally {
+      setLogger(previousLogger)
+    }
   })
 
   it('stamps the server-assigned createdBy on a pushed document', async () => {

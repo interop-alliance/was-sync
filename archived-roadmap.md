@@ -1049,3 +1049,166 @@ requirements named only `Link` in `Access-Control-Expose-Headers`, so the
 validator the conditional-write design rests on was optional cross-origin.
 WASS-54 adds `ETag` and `Location` to that requirement; the write response body
 gains no validator members, and the driver code is unchanged.
+
+### WS-17: Echo pulled during the ack write-back window is dropped
+
+- status: done
+- done: 2026-10-05
+- priority: medium
+- labels: push, ack, pull, correctness, rxdb
+- design: designs/WS-17-ack-carries-server-state.md
+- design-approved: 2026-10-04
+- touches:
+  - was-sync: shipped here (ARCHITECTURE.md invariants 2 and 18, Glossary `Ack`
+    / `Echo`, README)
+  - was-client: WCL-128, shipped in 0.90.0 (`WriteAck` carries the stamp,
+    `meta`, and `createdBy`, lifted from a `2xx` body behind a shape guard;
+    `putMeta` returns an ack with no validator)
+  - was-teaching-server: WAS-189, shipped in 0.42.0 (2026-10-04): `PUT /:id`
+    answers `201` on create, a re-creation over a tombstone included, and `200`
+    on update, `PUT /:id/meta` answers `200`, both with the server-managed
+    members body (the WAS-172 stamp and the provenance) filled inside the write;
+    a resurrection records fresh `createdBy` / `createdAt`; `StorageBackend`
+    write return types widened, breaking for custom backends; ARCHITECTURE, the
+    WAS-96 wire inventory, CHANGELOG breaking note
+  - was-conformance-suite: shipped in 0.29.0 (2026-10-04): the strict-`204`
+    sites accept `201` / `200` / `204` and check the server-managed body shape
+    through one `assertResourceWriteResponse` helper; no ARCHITECTURE file,
+    AGENTS carries no write-response prose
+  - wallet-attached-storage-spec: WASS-55, filed 2026-10-05 (both operation
+    bullets, the `201` / `200` statuses, the four examples, the Quickstart, the
+    `createdBy` definition's resurrection exception, the privacy considerations,
+    the Version History; blocked-by WASS-47)
+  - unaffected: storage-core (`ResourceMetadata` is the stored record shape the
+    spec defines, and the write response body already satisfies it structurally;
+    the repo has no write-response type or prose)
+  - unaffected: encrypted-collections-spec (parties walked 2026-10-05; the
+    profile's only `204` write text is the chunk operations, which WAS-189 did
+    not change, and it states nothing about Resource or `/meta` writes)
+  - wallet-core: WC-278, filed 2026-10-05 (correct the stale write-ack passage
+    in `docs/cross-replica-sync-compatibility.md` and ARCHITECTURE; decide
+    whether the engine adopts the widened `WriteAck`; low priority)
+  - freewallet: FW-656, filed 2026-10-05 (bump was-sync and the server to 0.42,
+    re-verify the cross-replica conformance test against a body-answering
+    server, rewrite the stale echo prose in the conflict-handler test,
+    `browserStore.ts`, and ARCHITECTURE)
+  - was-react: WR-59, filed 2026-10-05 (bump was-sync and was-client to
+    `>=0.90.2`; no code reads the old ack members, ARCHITECTURE/AGENTS expected
+    unchanged)
+  - dcw: DCW-92, filed 2026-10-05 (not a was-sync consumer; the was-client floor
+    bump to `>=0.90.2` and the fake ports moved to the current `WriteAck` shape,
+    no `PushWriteAck` reader found; blocked-by DCW-89)
+- acceptance:
+  - [x] The write response body carries the record's full stamp (`updatedAt`,
+        `updatedAtCounter`, `originId`; the nested `meta` on a `/meta` write)
+        beside `createdBy` (decided 2026-10-03, the design doc's section 8
+        option a), was-client's `WriteAck` carries the same members, and the ack
+        write-back stamps them under WS-23's unit rule
+  - [x] `PushWriteAck` keeps each port ack whole
+        (`{ id, pushedUpdatedAt, content?, meta? }`), `pushRow` fills `content`
+        from the content write or delete and `meta` from the `/meta` write, and
+        `hasAck` counts a validator alone
+  - [x] `createPushHandler` calls `onWriteAccepted` only for a row that returned
+        no conflict entry, with the content-then-`/meta` `412` and `404` cases
+        pinned
+  - [x] `createAckWriteBack` stamps the content stamp and `createdBy` from the
+        content ack and `meta` from the `/meta` ack alongside the validators in
+        the same `incrementalPatch`, only when the same ack carries a validator,
+        the content stamp only while the row's `updatedAt` equals
+        `pushedUpdatedAt`, and skipping a member longer than the schema allows
+  - [x] A forced-window integration case holds a content write's response until
+        a nudged pull has returned the echo into the write-back window, asserts
+        the row still lacks the server stamp before releasing it, and the row
+        then ends with the server's `createdBy`, stamp, and `etag` (the design
+        doc's section 7 note records why the window is forced at the write-back
+        rather than the first write)
+  - [x] The two integration cases that wait for `awaitInSync` before nudging a
+        pull drop that wait
+  - [x] The was-client devDependency and peer floor move to the release that
+        widens `WriteAck` (done: 0.90.1); the server devDependency comes from
+        the registry (done: was-teaching-server 0.42.0, published 2026-10-04)
+  - [x] ARCHITECTURE.md invariants 2 and 18 and the Glossary `Ack` / `Echo`
+        entries describe the ack as a source of the two members, with the three
+        residuals named
+  - [x] CHANGELOG.md entry
+  - [x] `touches:` entries resolved (2026-10-05)
+
+Context: After this replica pushes a row, the server's echo comes back down the
+feed. RxDB drops a pulled state for a row whose local state differs from its
+assumed primary, or that has no assumed primary yet, and the pull checkpoint
+still moves past it. The item first placed that window at the ack write-back. It
+starts earlier: a locally created row has no assumed primary from its insert
+until RxDB writes the replication meta after the push handler returns, so an
+echo pulled during the push's own HTTP round trip is dropped too, and nothing on
+the ack path can cover that span. The row then keeps the client's `updatedAt`
+and never learns its `createdBy`, however `isEqual` is written. The write
+response carries only an `ETag` today, so the ack cannot supply those two
+members either.
+
+discovered-from: WS-6
+
+The fix makes the echo unnecessary for this replica's own writes. The write
+response carries the server-managed members (`201` on create, a re-creation over
+a tombstone included, `200` on update, with `contentType`, `size`, `updatedAt`,
+and on a `201` this write's `createdAt` and `createdBy`; signed off 2026-10-02,
+the resurrection rule 2026-10-03), was-client's `WriteAck` carries `updatedAt`
+and `createdBy`, and the existing ack write-back stamps them into the row with
+the validators, only when the ack also carries a validator and the row still
+holds the pushed `updatedAt`. The write-back is also skipped for a row that
+returned a conflict entry, since it collides with RxDB's conflict fork write and
+discards the resolver's decision today. A dropped echo then costs nothing. The
+window itself stays, and stays load-bearing in three residual cases: a server
+that still answers `204`, a hidden `ETag` (WS-21), and a swallowed write-back
+failure. The first draft delivered the acked state through RxDB's conflict
+array; the review pass found that RxDB writes no replication meta for such a row
+when the local row changed during the push, so a delete during a create's push
+would leave the server copy live, and the design returned to the write-back. The
+design doc enumerates the sites and the interaction matrix.
+
+WAS-96 (was-teaching-server's approved multi-primary design, 2026-10-02) changes
+the ground under this item. Its stamp model removes `version` and `metaVersion`
+from the wire and adds `updatedAtCounter` and `originId` beside `updatedAt`,
+with a nested `meta` object for the `/meta` record (WS-23). The write response
+body signed off here (`contentType`, `size`, `updatedAt`, `createdAt`,
+`createdBy`) predates the stamp, so as written the ack would stamp an
+`updatedAt` with no counter or origin id, and the row would not compare equal to
+the feed echo once `statesEqual` compares stamp members. The acceptance boxes
+that name the row's `version` and the write-back's revision rules describe
+members WAS-96 removes. Decided 2026-10-03: the stamp members are folded into
+this item's body shape, so the server changes its write response once, and WS-23
+lands first against the `etag`-only ack. The body shape is a wire decision the
+two designs share; WAS-96's wire inventory gains an entry for it.
+
+Design note from the 2026-10-04 cleanup pass: `PushWriteAck` today merges the
+two port acks into renamed members (`etag`, `metaEtag`), which loses which write
+each value came from. Once the ack carries the stamp, a shape that keeps each
+port ack whole (`{ id, content?: WriteAck, meta?: WriteAck }`) lets the
+write-back patch the content ack onto the top-level triple and the `/meta` ack
+onto `meta` as units, so the unit rule follows from the shape rather than from
+per-member routing in `recordAck` and the write-back.
+
+### WS-27: Rows from a re-created Collection's previous generation linger in the replica
+
+- status: done
+- done: 2026-10-05
+- priority: low
+- labels: pull, checkpoint, correctness, was-96
+- acceptance:
+  - [x] Either the pull handler, on a refused checkpoint, marks every row the
+        restarted feed does not list as deleted once the restart has caught up,
+        or the residual is documented in ARCHITECTURE.md with the conditions
+        under which it occurs
+  - [x] An integration case deletes and re-creates the Collection on the server,
+        pulls, and asserts the chosen outcome for a row that existed only in the
+        previous generation
+
+Context: WAS-96 embeds the Collection's feed generation in the opaque
+checkpoint, and a Collection tombstone followed by a re-create mints a new
+generation. The server refuses the stale checkpoint with the `400` that 0.7.0
+already turns into a restart from the beginning. The restarted feed lists only
+the new life's writes, so a row that existed in the previous generation and was
+never re-created stays in the replica with no tombstone to clear it, and may be
+pushed back as a create. A re-created Collection is already a feed restart
+today, so the gap is latent now and becomes reachable through the replicated
+Collection tombstones WAS-96 adds (its WAS-174), where a tombstone applied from
+a peer cascades on every replica.

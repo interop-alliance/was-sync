@@ -18,6 +18,7 @@ import type {
   WithDeleted
 } from './types.js'
 import { copyOptionalBodyFields } from './types.js'
+import { log } from './log.js'
 
 /**
  * Maps one `changes`-feed wire document into a replica document. The envelope
@@ -72,7 +73,12 @@ export function wireDocToRxDoc(doc: WireDoc): WithDeleted<SyncedDoc> {
  * the restarted feed is empty the refused checkpoint stays stored and RxDB
  * offers it again on the next poll; the handler remembers the refusal and
  * skips straight to the restart, so the 400 round trip is paid once per
- * process rather than once per poll.
+ * replication rather than once per poll.
+ *
+ * The restart clears nothing. A row that existed only before a Collection was
+ * deleted and re-created stays in the replica. So does a row the new server
+ * never held. Such a row stays until a consumer forgets the replica
+ * (ARCHITECTURE.md documents the residual).
  *
  * @param port {WasSyncPort}
  * @returns {(lastCheckpoint: ReplicationCheckpoint | undefined, batchSize: number) =>
@@ -108,6 +114,10 @@ export function createPullHandler(port: WasSyncPort) {
       // The server did not issue this checkpoint: restart the feed, and do
       // not hand the refused checkpoint back should the restarted page be
       // empty.
+      log.warn(
+        'The server refused the stored checkpoint; restarting the feed from the beginning',
+        { err }
+      )
       refused = resumeFrom
       resumeFrom = undefined
       response = await fetchPage()

@@ -331,6 +331,35 @@ numbered so items and reviews can cite them.
     best-effort basis. On such a server an echo dropped in the window leaves the
     row without a validator, and its next content edit goes out unconditional.
 
+19. **A refused checkpoint restarts the feed and clears nothing.** A server
+    refuses a checkpoint it did not issue with a `400`, which the port raises as
+    its refused-checkpoint signal (`isSyncCheckpointError`). The pull handler
+    then pulls again from the beginning and logs a `warn` ("The server refused
+    the stored checkpoint; restarting the feed from the beginning", with `err`).
+    That entry is the consumer's signal that a restart happened. RxDB stores a
+    checkpoint only with a non-empty page, so after an empty restart it offers
+    the refused one again on every poll. The handler remembers the refusal for
+    the life of the replication and skips straight to the restart, so the `400`
+    is paid once. The teaching server scopes a checkpoint to the Collection URL
+    and to one life of the Collection's feed, its generation. A Collection
+    delete leaves a tombstone and drops the feed counter. A re-create under the
+    same id mints a fresh generation, and a checkpoint from before is refused.
+    The restarted feed lists only the new life's writes. A row that existed only
+    in the previous generation stays in the replica with no tombstone to clear
+    it. It is not pushed back on its own, since RxDB holds nothing pending for
+    it. An edit to it goes out with the old validator and draws a `412`. The
+    re-read primary is absent, so the push re-creates the resource on the server
+    as a create-if-absent. The integration suite pins both halves: the row
+    lingers locally while absent on the server, and returns only when edited.
+    Clearing every row the restarted feed does not list was rejected. The same
+    restart fires when another server issued the checkpoint, the failover case
+    WS-28 covers, and the driver cannot tell the two cases apart. A clear would
+    then delete the replica's rows on a failover to a server that is merely
+    behind. A consumer that deletes and re-creates a Collection, or learns that
+    one was, forgets the replica together with its `rx-replication-meta-*`
+    instance. That is the same forget invariant 7 (the replica schema is stored
+    state) describes for a schema change.
+
 ## Ownership heuristics
 
 - **A WAS request, an error class, or a wire name** belongs to
@@ -406,8 +435,10 @@ the byoe-ecosystem layer map instead.
   persists in its replication meta (`ReplicationCheckpoint`): the opaque
   `SyncCheckpoint` string under a `checkpoint` member. RxDB stacks checkpoints
   with `Object.assign`, which would scatter a bare string into index-keyed
-  characters, so the string is wrapped for RxDB and unwrapped for the port.
-  Avoid: RxDB checkpoint, checkpoint object.
+  characters, so the string is wrapped for RxDB and unwrapped for the port. A
+  checkpoint the server refuses restarts the feed from the beginning (invariant
+  19, a refused checkpoint restarts the feed and clears nothing). Avoid: RxDB
+  checkpoint, checkpoint object.
 - **Wire doc** -- one JSON Resource document of the `changes` feed as the sync
   port hands it on (`WireDoc`), with the feed's `deleted` renamed `_deleted`. It
   carries `updatedAt`, `updatedAtCounter`, and `originId` on every document,

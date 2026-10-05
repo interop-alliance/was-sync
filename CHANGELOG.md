@@ -1,5 +1,15 @@
 # @interop/was-sync Changelog
 
+## 0.8.2 - TBD
+
+### Changed
+
+- A refused pull checkpoint now logs a `warn` before the feed restarts.
+  ARCHITECTURE.md documents the restart's residual. A row from a re-created
+  Collection's previous generation stays in the replica until it is forgotten,
+  and returns to the server as a create only when edited (WS-27).
+- Update the `@interop/was-client` devDependency to `^0.91.0`.
+
 ## 0.8.1 - 2026-10-04
 
 ### Fixed
