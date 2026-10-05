@@ -968,3 +968,36 @@ ignores the member, sending it is harmless but misleading, and once the port
 drops the option it no longer compiles. The benign-412 delete retry reads the
 label off the re-read primary's content record, which WAS-96 keeps, so WS-5's
 rule is unaffected.
+
+### WS-22: A local delete during a create's push goes out as a header-less `DELETE`
+
+- status: done
+- done: 2026-10-04
+- priority: medium
+- labels: push, delete, correctness
+- acceptance:
+  - [x] A row inserted and removed while its create `PUT` is in flight is
+        deleted on the server with an `If-Match` carrying the create's
+        validator, or the delete is deferred until the row holds one
+  - [x] An integration case pins the race against the live server and asserts
+        the `DELETE` request's precondition
+
+Context: When the user removes a row while its create is still in flight, RxDB
+records the pushed row as the assumed primary (`upstream.js:309`) and the ack
+write-back then skips the tombstone (`src/wasReplication.ts:58-61`), so the
+assumed primary never gains the create's `etag`. The next push sends the delete
+with no `If-Match` (`src/pushWrites.ts:341-344`). Invariant 4 calls a
+header-less `DELETE` unsafe: under a content-addressed id another replica may
+hold a live copy of the same resource, and the unconditional delete tombstones
+it. The ack is known at the time the write-back runs, so one candidate is to
+carry it onto the tombstone, or to hold the delete until the row's assumed
+primary carries a validator. The case exists today and is unchanged by WS-17,
+which only widens what the write-back stamps on a live row.
+
+discovered-from: WS-17
+
+WAS-96 raises the cost of the unconditional `DELETE`. With Collection tombstones
+replicating under delete-wins and Resources byte-identical across replicas, the
+live copy another replica holds may now be on another server, and the tombstone
+this delete writes propagates to every peer. The priority should move to high
+once a consumer runs against a replicated Space.

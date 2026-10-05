@@ -1841,6 +1841,58 @@ describe('WAS replication (RxDB + live was-teaching-server)', () => {
     await replication.cancel()
   })
 
+  it("deletes a row removed during its own create push with If-Match carrying the create's validator", async () => {
+    // The row is removed locally while its create `PUT` is in flight. RxDB
+    // records the pushed live state as the assumed primary, and the ack
+    // write-back finds no live row to patch, so the assumed primary never
+    // gains the create's `etag`. The delete must not go out header-less (it
+    // would tombstone another replica's copy under the content-addressed id):
+    // it re-reads the primary and conditions on the validator it finds there.
+    const collection = await openCollection()
+    const { port, observer } = await openServerCollection()
+    const { contentWrites, deleteWrites } = recordPreconditionsOn(port)
+    let createdEtag: string | undefined
+    const rawPut = port.putContent.bind(port)
+    port.putContent = async options => {
+      const ack = await rawPut(options)
+      if (createdEtag === undefined) {
+        createdEtag = ack.etag
+        // Remove the row before the ack returns, so the write-back finds it
+        // gone.
+        await (await collection.findOne(options.id).exec())!.remove()
+      }
+      return ack
+    }
+    const replication = createWasReplication({
+      rxCollection: collection,
+      wasPort: port,
+      replicationIdentifier: 'test-validator-less-delete'
+    })
+    const errors: unknown[] = []
+    replication.error$.subscribe(err => errors.push(err))
+    await replication.awaitInitialReplication()
+
+    await collection.insert({
+      id: 'cid-removed-in-flight',
+      updatedAt: '000000000001',
+      data: { hello: 'world' }
+    })
+    await eventually(
+      () => deleteWrites.length > 0,
+      () => replication.reSync()
+    )
+    await replication.awaitInSync()
+
+    expect(createdEtag).toBeDefined()
+    expect(contentWrites).toEqual([{ ifNoneMatch: true }])
+    expect(deleteWrites).toEqual([{ ifMatch: createdEtag }])
+    expect(await observer.get({ id: 'cid-removed-in-flight' })).toBeNull()
+    expect(await localRow(collection, 'cid-removed-in-flight')).toBeNull()
+    expect(errors).toEqual([])
+
+    await replication.cancel()
+  })
+
   it("lands the resolver's choice when another replica deletes between the content write and the /meta write", async () => {
     // A create carrying `custom` is two writes. Another replica deletes the
     // resource after the content write lands and before the `/meta` write, so

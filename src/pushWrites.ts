@@ -14,7 +14,9 @@
  * - content changed -> `PUT /:id` (`If-Match: <etag>`, the opaque validator
  *   the assumed primary last reported) or, on create, `PUT /:id`
  *   (`If-None-Match: *`); a delete -> `DELETE /:id` (`If-Match: <etag>`), or
- *   no write at all when there is no assumed primary.
+ *   no write at all when there is no assumed primary. A live assumed primary
+ *   with no `etag` re-reads the primary first and conditions the delete on the
+ *   re-read validator.
  * - metadata changed -> `PUT /:id/meta` (`If-Match: <metaEtag>`, or
  *   `If-None-Match: *` when the resource has no metadata yet); a metadata
  *   CLEAR (the new state carries no `custom`) writes the cleared state rather
@@ -54,6 +56,22 @@
  * either side carries no label (no `writerId` injected, or the server holds
  * none for the record), body equality is all there is and the retry keeps its
  * original rule.
+ *
+ * A delete can also find a live assumed primary that holds no validator at all.
+ * This happens when a row is inserted and then removed locally while its create
+ * `PUT` is still in flight. RxDB records the pushed live state as the assumed
+ * primary. The ack write-back then finds no live row to patch, so the create's
+ * `etag` never reaches the assumed primary. A header-less `DELETE` is unsafe
+ * here. Ids are content-addressed, so another replica may hold a live copy
+ * under the same id, and the delete would tombstone it. So the delete first
+ * re-reads the primary and conditions on its validator, under the same
+ * own-drift rule the benign retry uses. A primary that is absent (or a
+ * tombstone) needs no delete, and the row is reported accepted with no ack. A
+ * primary whose body differs, or that carries another writer's label, is
+ * reported as a conflict and no delete is sent. A `412` on the conditioned
+ * delete is a real conflict. Only a server that hides its `ETag` leaves the
+ * re-read with no validator, and there the delete goes unconditional, as every
+ * conditional write there already does.
  *
  * A `412` whose re-read resolves `null` is reported as a tombstone conflict
  * entry carrying the local `updatedAt` and no other stamp member, no `etag`,
@@ -115,7 +133,8 @@
  * one. The server's declare-or-clear rule means a content write without it
  * clears the stored label, so a replication run without a `writerId`
  * attributes nothing rather than leaving a previous writer's label in place.
- * The benign-412 delete re-issue declares it too.
+ * The benign-412 delete re-issue and the validator-less delete declare it
+ * too.
  */
 import {
   isSyncAuthError,
@@ -392,6 +411,47 @@ async function pushRow({
     }
   }
 
+  // Deletes a row whose live assumed primary holds no validator (the header's
+  // validator-less note). The primary is re-read first: an absent one needs no
+  // delete, own content is deleted conditional on the re-read `etag`, and any
+  // other primary is reported as a conflict with no delete sent. A `412` on
+  // the conditioned delete propagates to the caller's conflict path.
+  const deleteValidatorLess = async (): Promise<{
+    conflict: WithDeleted<SyncedDoc> | null
+    ack: PushWriteAck | null
+  }> => {
+    const primary = await readPrimary()
+    if (primary === null || primary.deleted === true) {
+      log.debug('Delete of a validator-less row; already absent', { id })
+      return { conflict: null, ack: null }
+    }
+    if (!isOwnDrift(primary)) {
+      log.debug(
+        'Delete of a validator-less row; the primary differs, a conflict',
+        {
+          id,
+          etag: primary.etag
+        }
+      )
+      return conflictOutcome(primary)
+    }
+    log.debug(
+      'Delete of a validator-less row; conditioned on the re-read ETag',
+      {
+        id,
+        etag: primary.etag
+      }
+    )
+    recordAck(
+      'content',
+      await deleteAbsentAsDone({
+        id,
+        ...(primary.etag !== undefined && { ifMatch: primary.etag })
+      })
+    )
+    return { conflict: null, ack: hasAck() ? ack : null }
+  }
+
   try {
     if (newDocumentState._deleted) {
       // No assumed primary: this replica never pushed the row, so it holds no
@@ -399,6 +459,10 @@ async function pushRow({
       if (assumedMasterState === undefined) {
         log.debug('Delete of a row this replica never pushed; skipped', { id })
         return { conflict: null, ack: null }
+      }
+      // A live assumed primary with no validator: condition on a re-read.
+      if (!assumedIsTombstone && deleteEtag === undefined) {
+        return await deleteValidatorLess()
       }
       // Delete supersedes any metadata write: drop the content, tombstone wins.
       recordAck('content', await deleteWithBenignRetry())

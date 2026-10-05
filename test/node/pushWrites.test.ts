@@ -2099,6 +2099,247 @@ describe('createPushHandler benign delete retry', () => {
   })
 })
 
+describe('createPushHandler validator-less delete', () => {
+  // A row inserted and then removed locally while its create `PUT` is in
+  // flight: RxDB records the pushed live state as the assumed primary, and the
+  // ack write-back finds no live row to patch, so the assumed primary holds no
+  // `etag`. A header-less `DELETE` would tombstone another replica's copy under
+  // the content-addressed id, so the delete re-reads the primary first.
+
+  /**
+   * The server's live primary for `r1`, with the body the assumed primary
+   * holds unless overridden.
+   *
+   * @param over {Partial<PrimaryState>}
+   * @returns {PrimaryState}
+   */
+  function livePrimary(over: Partial<PrimaryState> = {}): PrimaryState {
+    return {
+      updatedAt: '2026-02-02T00:00:00Z',
+      ...contentStamp,
+      etag: etagFor(1),
+      data: { a: 1 },
+      ...over
+    }
+  }
+
+  /**
+   * The push row under test: a delete over a live assumed primary that holds
+   * no `etag`.
+   */
+  const validatorLessDelete = {
+    assumedMasterState: newDoc({ data: { a: 1 } }),
+    newDocumentState: newDoc({ _deleted: true })
+  }
+
+  it('re-reads the primary and conditions the delete on its ETag', async () => {
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
+    const port = fakePushPort({ primary: livePrimary() })
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    try {
+      const conflicts = await push([validatorLessDelete])
+
+      expect(conflicts).toEqual([])
+      expect(port.getCalls).toEqual(['r1'])
+      // The re-read goes through the batch memo, like the other re-reads.
+      expect(port.getOptions[0]!.cache).toBeDefined()
+      expect(port.writes).toEqual([
+        { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(1) }
+      ])
+      // No header-less delete went out.
+      expect(port.writes.every(write => 'ifMatch' in write)).toBe(true)
+      // A `204` delete carries no validator, so there is nothing to ack.
+      expect(acks).toEqual([])
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]).toMatchObject({
+        level: 'debug',
+        msg: 'Delete of a validator-less row; conditioned on the re-read ETag',
+        data: { id: 'r1', etag: etagFor(1) }
+      })
+    } finally {
+      setLogger(previous)
+    }
+  })
+
+  it('reports the delete ack like the ordinary delete path', async () => {
+    const base = fakePushPort({ primary: livePrimary() })
+    const port: WasSyncPort = {
+      ...base,
+      async deleteContent(options) {
+        await base.deleteContent(options)
+        return { etag: etagFor(2) }
+      }
+    }
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    expect(await push([validatorLessDelete])).toEqual([])
+    expect(acks).toStrictEqual([
+      ackOf({ id: 'r1', content: { etag: etagFor(2) } })
+    ])
+  })
+
+  it('sends no delete and reports the row accepted when the re-read is absent', async () => {
+    const capture = captureLogger('sync')
+    const previous = setLogger(capture.logger)
+    const port = fakePushPort({ primary: null })
+    const acks: PushWriteAck[] = []
+    const push = createPushHandler({
+      port,
+      onWriteAccepted: async ack => {
+        acks.push(ack)
+      }
+    })
+
+    try {
+      const conflicts = await push([validatorLessDelete])
+
+      expect(conflicts).toEqual([])
+      expect(port.getCalls).toEqual(['r1'])
+      expect(port.writes).toEqual([])
+      expect(acks).toEqual([])
+      expect(capture.events).toHaveLength(1)
+      expect(capture.events[0]).toMatchObject({
+        level: 'debug',
+        data: { id: 'r1' }
+      })
+    } finally {
+      setLogger(previous)
+    }
+  })
+
+  it('sends no delete when a feed-backed re-read finds a tombstone', async () => {
+    const port = fakePushPort({
+      primary: { updatedAt: '2026-02-02T00:00:00Z', deleted: true }
+    })
+    const push = createPushHandler({ port })
+
+    expect(await push([validatorLessDelete])).toEqual([])
+    expect(port.writes).toEqual([])
+  })
+
+  it('sends no delete and reports a conflict when the re-read body differs', async () => {
+    const port = fakePushPort({ primary: livePrimary({ data: { a: 99 } }) })
+    const push = createPushHandler({ port })
+
+    const conflicts = await push([validatorLessDelete])
+
+    expect(port.writes).toEqual([])
+    expect(conflicts).toStrictEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        etag: etagFor(1),
+        data: { a: 99 },
+        _deleted: false
+      }
+    ])
+  })
+
+  it("sends no delete and reports a conflict when the equal body is under another writer's label", async () => {
+    const port = fakePushPort({ primary: livePrimary({ writerId: 'w-b' }) })
+    const push = createPushHandler({ port, writerId: 'w-a' })
+
+    const conflicts = await push([validatorLessDelete])
+
+    expect(port.writes).toEqual([])
+    expect(conflicts).toStrictEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        etag: etagFor(1),
+        data: { a: 1 },
+        _deleted: false
+      }
+    ])
+  })
+
+  it('conditions the delete on the re-read ETag and declares the writerId under its own label', async () => {
+    const port = fakePushPort({ primary: livePrimary({ writerId: 'w-a' }) })
+    const push = createPushHandler({ port, writerId: 'w-a' })
+
+    expect(await push([validatorLessDelete])).toEqual([])
+    expect(port.writes).toEqual([
+      {
+        kind: 'deleteContent',
+        id: 'r1',
+        ifMatch: etagFor(1),
+        writerId: 'w-a'
+      }
+    ])
+  })
+
+  it('lets body equality decide when neither side carries a label', async () => {
+    const equal = fakePushPort({ primary: livePrimary() })
+    expect(
+      await createPushHandler({ port: equal })([validatorLessDelete])
+    ).toEqual([])
+    expect(equal.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(1) }
+    ])
+
+    const differing = fakePushPort({
+      primary: livePrimary({ data: { a: 2 } })
+    })
+    expect(
+      await createPushHandler({ port: differing })([validatorLessDelete])
+    ).toHaveLength(1)
+    expect(differing.writes).toEqual([])
+  })
+
+  it('deletes with no If-Match when the re-read primary carries no ETag either', async () => {
+    // A server that hides its `ETag` leaves no validator anywhere; the delete
+    // goes unconditional there, as every conditional write there already does.
+    const primary = livePrimary()
+    delete primary.etag
+    const port = fakePushPort({ primary })
+    const push = createPushHandler({ port })
+
+    expect(await push([validatorLessDelete])).toEqual([])
+    expect(port.writes).toEqual([{ kind: 'deleteContent', id: 'r1' }])
+    expect('ifMatch' in port.writes[0]!).toBe(false)
+  })
+
+  it('reports a 412 on the conditioned delete as a conflict without retrying', async () => {
+    const port = fakePushPort({
+      conflictOn: { kind: 'deleteContent', id: 'r1' },
+      primary: livePrimary()
+    })
+    const push = createPushHandler({ port })
+
+    const conflicts = await push([validatorLessDelete])
+
+    expect(port.writes).toEqual([
+      { kind: 'deleteContent', id: 'r1', ifMatch: etagFor(1) }
+    ])
+    expect(conflicts).toStrictEqual([
+      {
+        id: 'r1',
+        updatedAt: '2026-02-02T00:00:00Z',
+        ...contentStamp,
+        etag: etagFor(1),
+        data: { a: 1 },
+        _deleted: false
+      }
+    ])
+  })
+})
+
 describe('createPushHandler delete of an absent resource', () => {
   it('treats a not-found delete as already gone and lets the rest of the batch land', async () => {
     // The default was-client port raises the not-found signal on a delete

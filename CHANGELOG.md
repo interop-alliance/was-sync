@@ -1,5 +1,15 @@
 # @interop/was-sync Changelog
 
+## 0.8.1 - TBD
+
+### Fixed
+
+- A row removed while its create push is in flight is no longer deleted with a
+  header-less `DELETE`. The driver re-reads the primary and sends the delete
+  with `If-Match` carrying the resource's validator. A re-read showing another
+  writer's record or a changed body surfaces as a conflict. An absent or
+  tombstoned re-read is read as already gone (WS-22).
+
 ## 0.8.0 - 2026-10-04
 
 ### Fixed

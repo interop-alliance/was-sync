@@ -98,53 +98,60 @@ numbered so items and reviews can cite them.
    the labels must match for the retry to fire; with no label on either side,
    equality decides. The push-ack write-back only makes the case rarer -- it is
    best-effort and swallows its own failure -- so the retry stays the authority
-   for deletes. A delete with no assumed primary is skipped, not sent: the row
-   was created and deleted locally before this replica ever pushed it, so the
-   replica holds no server state for it, while another replica may hold a live
-   resource under the same content-addressed id (invariant 2). HTTP has no
-   precondition for "delete only what I created" (an `If-Match` needs a
-   validator this replica never had, and a header-less `DELETE` would tombstone
-   the other replica's copy), so `src/pushWrites.ts` issues no write and reports
-   the row accepted with no ack, the create path's `If-None-Match: *` guard
-   mirrored. RxDB then settles the local tombstone as the assumed primary. The
-   replica keeps that tombstone until the resource next changes on the feed
-   (RxDB defers a pulled state behind a pending local change, and the initial
-   pull pages past the live copy while the delete is still pending); the first
-   such change brings the live copy down, since nothing is pending against the
-   row by then. The integration suite pins the skip, the intact copy, and that
-   convergence. A delete's `404` (was-client's not-found signal, matched by
-   name) is the already-gone outcome on either delete call, not an error: a
-   conformant server answers `204` for an authorized delete of an absent
-   resource, so the `404` is a masked authorization refusal that no retry can
-   advance, and rethrowing it would pin the whole batch in RxDB's retry loop.
-   Revoked access still surfaces on the next feed pull. A `/meta` write's `404`
-   is likewise not an error on its own: a metadata-only edit against a resource
-   another replica deleted is the same delete race, raised as the not-found
-   signal on the default port and as the auth signal with `status: 404` on a
-   `mapAuthErrors` port. One classifier in `src/pushWrites.ts` takes both shapes
-   to the same corroborating feed re-read, and an absent or tombstoned primary
-   resolves the row as a tombstone conflict entry for the conflict handler; a
-   primary that is alive rethrows the original signal. A tombstone is absent for
-   preconditions: a `412` whose re-read resolves `null` builds a tombstone
-   conflict entry carrying only `id`, the local `updatedAt`, and
-   `_deleted: true`, with no `etag` and no other stamp member (the plain port
-   cannot tell a tombstone from a resource that never existed, and both take the
-   same next write), and an assumed primary with `_deleted: true` routes a
-   content write to `If-None-Match: *` and a delete to an unconditional
-   `DELETE`, since `If-Match` against a tombstone is refused whatever validator
-   it carries. That refusal is RFC 9110's rule, not a server quirk: a tombstone
-   has no current representation (which is why `GET` answers `404`), and against
-   no representation `If-None-Match: *` is true and `If-Match` with any tag is
-   false. Honoring the tombstone's surviving ETag was considered and rejected on
-   2026-09-07: it would put WAS at odds with the HTTP semantics the spec
-   borrows, for a gain confined to one race (a third replica re-creating and
-   re-deleting in between), which the changes feed already surfaces as later
-   entries for the next pull to reconcile. The `/meta` half of a resurrection is
-   a create-if-absent for the same reason: a tombstone entry carries no
-   `custom`, no `meta`, and no `metaEtag`, so the handler compares the local
-   `custom` against nothing and sends `If-None-Match: *`, and against the
-   teaching server, whose tombstone drops the metadata object and retires its
-   validator, both halves land in one push cycle. A server that kept the
+   for deletes. A row removed while its create `PUT` is in flight leaves a live
+   assumed primary with no validator, since RxDB records the pushed state and
+   the write-back finds no live row to patch. That delete re-reads the primary
+   first, through the same batch-memoized read. An absent or tombstoned primary
+   is the already-gone outcome, and own content under the rule above is deleted
+   with `If-Match` on the re-read validator (with none only when the primary
+   carries none, as on a hidden-`ETag` deployment). A changed body or another
+   writer's label sends no delete and surfaces the primary as a conflict. A
+   delete with no assumed primary is skipped, not sent: the row was created and
+   deleted locally before this replica ever pushed it, so the replica holds no
+   server state for it, while another replica may hold a live resource under the
+   same content-addressed id (invariant 2). HTTP has no precondition for "delete
+   only what I created" (an `If-Match` needs a validator this replica never had,
+   and a header-less `DELETE` would tombstone the other replica's copy), so
+   `src/pushWrites.ts` issues no write and reports the row accepted with no ack,
+   the create path's `If-None-Match: *` guard mirrored. RxDB then settles the
+   local tombstone as the assumed primary. The replica keeps that tombstone
+   until the resource next changes on the feed (RxDB defers a pulled state
+   behind a pending local change, and the initial pull pages past the live copy
+   while the delete is still pending); the first such change brings the live
+   copy down, since nothing is pending against the row by then. The integration
+   suite pins the skip, the intact copy, and that convergence. A delete's `404`
+   (was-client's not-found signal, matched by name) is the already-gone outcome
+   on either delete call, not an error: a conformant server answers `204` for an
+   authorized delete of an absent resource, so the `404` is a masked
+   authorization refusal that no retry can advance, and rethrowing it would pin
+   the whole batch in RxDB's retry loop. Revoked access still surfaces on the
+   next feed pull. A `/meta` write's `404` is likewise not an error on its own:
+   a metadata-only edit against a resource another replica deleted is the same
+   delete race, raised as the not-found signal on the default port and as the
+   auth signal with `status: 404` on a `mapAuthErrors` port. One classifier in
+   `src/pushWrites.ts` takes both shapes to the same corroborating feed re-read,
+   and an absent or tombstoned primary resolves the row as a tombstone conflict
+   entry for the conflict handler; a primary that is alive rethrows the original
+   signal. A tombstone is absent for preconditions: a `412` whose re-read
+   resolves `null` builds a tombstone conflict entry carrying only `id`, the
+   local `updatedAt`, and `_deleted: true`, with no `etag` and no other stamp
+   member (the plain port cannot tell a tombstone from a resource that never
+   existed, and both take the same next write), and an assumed primary with
+   `_deleted: true` routes a content write to `If-None-Match: *` and a delete to
+   an unconditional `DELETE`, since `If-Match` against a tombstone is refused
+   whatever validator it carries. That refusal is RFC 9110's rule, not a server
+   quirk: a tombstone has no current representation (which is why `GET` answers
+   `404`), and against no representation `If-None-Match: *` is true and
+   `If-Match` with any tag is false. Honoring the tombstone's surviving ETag was
+   considered and rejected on 2026-09-07: it would put WAS at odds with the HTTP
+   semantics the spec borrows, for a gain confined to one race (a third replica
+   re-creating and re-deleting in between), which the changes feed already
+   surfaces as later entries for the next pull to reconcile. The `/meta` half of
+   a resurrection is a create-if-absent for the same reason: a tombstone entry
+   carries no `custom`, no `meta`, and no `metaEtag`, so the handler compares
+   the local `custom` against nothing and sends `If-None-Match: *`, and against
+   the teaching server, whose tombstone drops the metadata object and retires
+   its validator, both halves land in one push cycle. A server that kept the
    metadata object through a tombstone would answer that create with a `412`,
    which costs one extra cycle (the re-read, a metadata conflict entry, a
    resolution) rather than failing the row. The integration suite pins both the
